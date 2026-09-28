@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import copy
+from collections.abc import Mapping
+from typing import Any
+
 DOMAIN = "room_routines"
 NAME = "Room Routines"
 
@@ -23,3 +27,11 @@ def room_signal(entry_id: str, room_id: str) -> str:
 
 def house_signal(entry_id: str) -> str:
     return f"{DOMAIN}_{entry_id}_house"
+
+
+OPTION_KEYS = (CONF_PERIODS, CONF_ALT_DAYS, CONF_ROOMS)
+
+
+def clean_options(options: Mapping[str, Any]) -> dict[str, Any]:
+    """A deep copy of the options holding only the keys this integration writes."""
+    return {key: copy.deepcopy(value) for key, value in options.items() if key in OPTION_KEYS}

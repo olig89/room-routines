@@ -18,7 +18,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.helpers.typing import ConfigType
 
-from .const import DOMAIN, SERVICE_SET_LOOK
+from .const import DOMAIN, SERVICE_SET_LOOK, clean_options
 from .core.looks import OFF, LightTarget, Look
 from .core.room import RoomConfig
 from .core.serial import look_to
@@ -79,7 +79,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             raise ServiceValidationError(
                 f"There is no period called {period!r}. Periods: {', '.join(house.schedule.order())}"
             )
-        options: dict[str, Any] = copy.deepcopy(dict(house.entry.options))
+        options: dict[str, Any] = clean_options(house.entry.options)
         looks = options["rooms"][runner.room_id].setdefault("looks", {})
         kind = call.data["look"]
         if kind == LOOK_BORROW:
@@ -110,6 +110,10 @@ def _remove_old_rooms(hass: HomeAssistant, entry: RoomRoutinesConfigEntry, house
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: RoomRoutinesConfigEntry) -> bool:
+    if (options := clean_options(entry.options)) != dict(entry.options):
+        # Keys outside periods / alt_days / rooms were written by something other than
+        # this integration's own settings; drop them before anything reads the options.
+        hass.config_entries.async_update_entry(entry, options=options)
     house = House(hass, entry)
     entry.runtime_data = house
     _remove_old_rooms(hass, entry, house)

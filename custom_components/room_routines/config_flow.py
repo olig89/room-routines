@@ -38,7 +38,7 @@ from homeassistant.helpers.selector import (
     TimeSelector,
 )
 
-from .const import CONF_ALT_DAYS, CONF_PERIODS, CONF_ROOMS, DOMAIN, NAME
+from .const import CONF_ALT_DAYS, CONF_PERIODS, CONF_ROOMS, DOMAIN, NAME, clean_options
 from .core.periods import default_schedule
 from .core.serial import (
     DEFAULT_COOLDOWN_S,
@@ -165,7 +165,7 @@ class RoomRoutinesOptionsFlow(OptionsFlow):
         self._period: str | None = None
 
     def _options(self) -> dict[str, Any]:
-        options = copy.deepcopy(dict(self.config_entry.options))
+        options = clean_options(self.config_entry.options)
         options.setdefault(CONF_ROOMS, {})
         options.setdefault(CONF_PERIODS, schedule_to(default_schedule())[CONF_PERIODS])
         return options

@@ -9,7 +9,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry, async_
 from homeassistant import config_entries
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
-from homeassistant.helpers import area_registry as ar, entity_registry as er
+from homeassistant.helpers import area_registry as ar, entity_registry as er, floor_registry as fr
 
 from custom_components.room_routines.const import DOMAIN
 from custom_components.room_routines.core.periods import default_schedule
@@ -399,3 +399,26 @@ async def test_removing_a_room_removes_its_entities(hass, lights):
     assert entry.options["rooms"] == {}
     assert hass.states.get(STATUS) is None
     assert hass.states.get(STEALTH) is not None
+
+
+async def test_entity_ids_stay_short_in_an_area_on_a_floor(hass, lights):
+    floor = fr.async_get(hass).async_create("2F")
+    area = ar.async_get(hass).async_create("Downstairs Toilet", floor_id=floor.floor_id)
+    await setup(hass, area_id=area.id)
+    # Without our own suggestion HA would name it sensor.2f_downstairs_toilet_downstairs_toilet_routine_status.
+    assert hass.states.get(STATUS) is not None
+    assert hass.states.get(MODE) is not None
+    assert hass.states.get("sensor.downstairs_toilet_routine_light_level") is not None
+    assert not [s.entity_id for s in hass.states.async_all() if "2f_" in s.entity_id]
+
+
+async def test_stray_option_keys_are_dropped_on_setup(hass, lights):
+    hass.states.async_set(CEILING, "off")
+    opts = options()
+    opts["wc"] = dict(opts["rooms"]["wc"])  # a copy of the room at the top level, as seen on a live install
+    entry = MockConfigEntry(domain=DOMAIN, title="Room Routines", data={}, options=opts)
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert set(entry.options) == {"periods", "alt_days", "rooms"}
+    assert hass.states.get(STATUS) is not None

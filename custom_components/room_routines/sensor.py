@@ -30,6 +30,7 @@ async def async_setup_entry(
 
 
 class RoomStatusSensor(RoomEntity, SensorEntity):
+    _platform_domain = "sensor"
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = [s.value for s in State]
 
@@ -59,6 +60,7 @@ class RoomStatusSensor(RoomEntity, SensorEntity):
 
 
 class RoomAmbientSensor(RoomEntity, SensorEntity):
+    _platform_domain = "sensor"
     _attr_device_class = SensorDeviceClass.ILLUMINANCE
     _attr_native_unit_of_measurement = LIGHT_LUX
     _attr_state_class = SensorStateClass.MEASUREMENT

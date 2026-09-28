@@ -23,6 +23,7 @@ async def async_setup_entry(
 
 
 class StealthSwitch(HouseEntity, SwitchEntity, RestoreEntity):
+    _platform_domain = "switch"
     def __init__(self, house) -> None:
         super().__init__(house, "stealth_mode")
 

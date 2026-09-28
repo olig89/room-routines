@@ -24,6 +24,7 @@ async def async_setup_entry(
 
 
 class PeriodSelect(HouseEntity, SelectEntity):
+    _platform_domain = "select"
     """Shows the current period; choosing one holds it until the next scheduled start."""
 
     _attr_icon = "mdi:clock-time-four-outline"
@@ -48,6 +49,7 @@ class PeriodSelect(HouseEntity, SelectEntity):
 
 
 class RoomModeSelect(RoomEntity, SelectEntity, RestoreEntity):
+    _platform_domain = "select"
     _attr_options = list(MODES)
     _attr_icon = "mdi:motion-sensor"
 
