@@ -1,0 +1,149 @@
+"""Settings as stored in the config entry, to and from the core's types.
+
+The config entry's options hold plain JSON:
+
+    {
+      "periods": [{"name": "Overnight", "start": "23:00", "alt_start": null}, ...],
+      "alt_days": [5, 6],
+      "rooms": {
+        "<room id>": {
+          "name": "Downstairs Toilet",
+          "area_id": "wc",
+          "lights": [...], "triggers": [...], "holds": [...],
+          "lux_sensor": "sensor.downstairs_toilet_lux",
+          "threshold_lux": 50, "timeout_s": 30, "cooldown_s": 30, "drift_s": 90, "fade_out_s": 15,
+          "powered_by": {"<bulb>": "<power circuit>"},
+          "blinds_with_periods": false,
+          "scaling": null | {"full_dark": 5, "threshold": 50, "min_factor": 0.3},
+          "looks": {"<period>": {"nothing": true} | {"lights": {...}, "blinds": {...}}}
+        }
+      }
+    }
+
+A look's light is ``{"on": true, "brightness_pct": 60, "color_temp_kelvin": 2700}``;
+``brightness_pct`` left out means "on at its last brightness".
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from datetime import time, timedelta
+from typing import Any
+
+from .looks import NOTHING, LightTarget, Look
+from .lux import Scaling
+from .periods import Period, Schedule, default_schedule
+from .room import RoomConfig
+
+DEFAULT_THRESHOLD_LUX = 50.0
+DEFAULT_TIMEOUT_S = 30
+DEFAULT_COOLDOWN_S = 30
+DEFAULT_DRIFT_S = 90
+DEFAULT_FADE_OUT_S = 15
+
+
+def _time(text: str | None) -> time | None:
+    if not text:
+        return None
+    return time.fromisoformat(text)
+
+
+def _hhmm(t: time | None) -> str | None:
+    return None if t is None else t.strftime("%H:%M")
+
+
+# ---- periods ----------------------------------------------------------------
+
+
+def schedule_from(options: Mapping[str, Any]) -> Schedule:
+    rows = options.get("periods")
+    if not rows:
+        return default_schedule()
+    return Schedule(
+        tuple(Period(r["name"], _time(r["start"]), _time(r.get("alt_start"))) for r in rows),
+        frozenset(int(d) for d in options.get("alt_days") or ()),
+    )
+
+
+def schedule_to(schedule: Schedule) -> dict[str, Any]:
+    return {
+        "periods": [
+            {"name": p.name, "start": _hhmm(p.start), "alt_start": _hhmm(p.alt_start)}
+            for p in schedule.periods
+        ],
+        "alt_days": sorted(schedule.alt_days),
+    }
+
+
+# ---- looks -------------------------------------------------------------------
+
+
+def target_from(data: Mapping[str, Any]) -> LightTarget:
+    rgb = data.get("rgb")
+    return LightTarget(
+        bool(data.get("on", True)),
+        data.get("brightness_pct"),
+        data.get("color_temp_kelvin"),
+        tuple(rgb) if rgb else None,
+    )
+
+
+def target_to(target: LightTarget) -> dict[str, Any]:
+    out: dict[str, Any] = {"on": target.on}
+    if target.on:
+        if target.brightness_pct is not None:
+            out["brightness_pct"] = target.brightness_pct
+        if target.color_temp_kelvin is not None:
+            out["color_temp_kelvin"] = target.color_temp_kelvin
+        if target.rgb is not None:
+            out["rgb"] = list(target.rgb)
+    return out
+
+
+def look_from(data: Mapping[str, Any]) -> Look:
+    if data.get("nothing"):
+        return NOTHING
+    return Look(
+        {light: target_from(t) for light, t in (data.get("lights") or {}).items()},
+        {cover: int(pos) for cover, pos in (data.get("blinds") or {}).items()},
+    )
+
+
+def look_to(look: Look) -> dict[str, Any]:
+    if look.nothing:
+        return {"nothing": True}
+    out: dict[str, Any] = {"lights": {light: target_to(t) for light, t in look.lights.items()}}
+    if look.blinds:
+        out["blinds"] = dict(look.blinds)
+    return out
+
+
+# ---- rooms -------------------------------------------------------------------
+
+
+def room_from(data: Mapping[str, Any]) -> RoomConfig:
+    scaling = data.get("scaling")
+    threshold = data.get("threshold_lux", DEFAULT_THRESHOLD_LUX)
+    return RoomConfig(
+        name=data["name"],
+        lights=tuple(data.get("lights") or ()),
+        triggers=tuple(data.get("triggers") or ()),
+        holds=tuple(data.get("holds") or ()),
+        looks={period: look_from(look) for period, look in (data.get("looks") or {}).items()},
+        threshold_lux=None if threshold is None else float(threshold),
+        scaling=Scaling(**scaling) if scaling else None,
+        timeout=timedelta(seconds=data.get("timeout_s", DEFAULT_TIMEOUT_S)),
+        cooldown=timedelta(seconds=data.get("cooldown_s", DEFAULT_COOLDOWN_S)),
+        drift=timedelta(seconds=data.get("drift_s", DEFAULT_DRIFT_S)),
+        fade_out=timedelta(seconds=data.get("fade_out_s", DEFAULT_FADE_OUT_S)),
+        powered_by=dict(data.get("powered_by") or {}),
+        blinds_with_periods=bool(data.get("blinds_with_periods", False)),
+    )
+
+
+def first_look(lights: list[str], schedule: Schedule) -> dict[str, Any]:
+    """A new room's looks: every light on at its last brightness, in every period.
+
+    Stored on the first period of the day only; the others borrow it.
+    """
+    return {schedule.order()[0]: {"lights": {light: {"on": True} for light in lights}}}

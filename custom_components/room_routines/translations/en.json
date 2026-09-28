@@ -1,0 +1,198 @@
+{
+  "config": {
+    "abort": {
+      "single_instance_allowed": "Room Routines is already set up. Add rooms from its settings."
+    },
+    "step": {
+      "user": {
+        "title": "Room Routines",
+        "description": "Motion lights that follow your daily routine. This creates the five default periods (overnight, early morning, morning, day, evening). Add your rooms afterwards from the integration's settings."
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "no_name": "Give the room a name.",
+      "invalid_room": "A room needs at least one light and at least one sensor that can switch the lights on. A sensor can't have both roles in the same room.",
+      "invalid_periods": "Every period needs a name of its own and a start time no other period uses on the same days.",
+      "last_period": "There has to be at least one period."
+    },
+    "step": {
+      "init": {
+        "title": "Room Routines",
+        "menu_options": {
+          "add_room": "Add a room",
+          "pick_room": "Change a room",
+          "remove_room": "Remove a room",
+          "periods": "Periods"
+        }
+      },
+      "add_room": {
+        "title": "Add a room",
+        "description": "Choosing an area fills in its lights and sensors on the next screen as suggestions. You can change any of them.",
+        "data": {
+          "name": "Name",
+          "area_id": "Area"
+        }
+      },
+      "room_details": {
+        "title": "{room}",
+        "description": "A new room starts in log-only mode, with every light switching on at its last brightness in every period. Save looks per period later with the 'Save a room look' action.",
+        "data": {
+          "lights": "Lights",
+          "triggers": "Sensors that switch the lights on",
+          "holds": "Sensors that only keep the lights on",
+          "lux_sensor": "Light-level sensor",
+          "threshold_lux": "Switch on below",
+          "timeout_s": "Switch off after the room is empty for",
+          "fade_out_s": "Fade out over",
+          "cooldown_s": "After lights are switched off by hand, ignore motion for",
+          "drift_s": "When the period changes, move to the new look over",
+          "self_fading": "Lights that fade by themselves"
+        },
+        "data_description": {
+          "lights": "The lights this room switches on and off.",
+          "triggers": "Any motion or presence sensor. When one of these sees someone and the room is dark enough, the lights come on.",
+          "holds": "Optional. These never switch the lights on, but keep them on while they see someone. Useful for a sensor that sometimes reports people who aren't there.",
+          "lux_sensor": "Optional. The room's own light level, only read while the room's lights are off.",
+          "threshold_lux": "Leave empty to switch on at any light level.",
+          "fade_out_s": "How long the lights take to go out at the end. 10 to 20 seconds is gentle enough not to notice from the corner of your eye; 0 switches straight off.",
+          "drift_s": "Only for a room that is lit when the period changes.",
+          "self_fading": "Optional. For lights whose own device fades them, such as a DALI gateway set to dim to off over a few seconds. These get a plain on or off and do their own fade. Lights that Home Assistant can fade are faded anyway; any others fade in small steps."
+        }
+      },
+      "pick_room": {
+        "title": "Change a room",
+        "data": {
+          "room": "Room"
+        }
+      },
+      "edit_room": {
+        "title": "Change a room",
+        "data": {
+          "name": "Name",
+          "area_id": "Area",
+          "lights": "Lights",
+          "triggers": "Sensors that switch the lights on",
+          "holds": "Sensors that only keep the lights on",
+          "lux_sensor": "Light-level sensor",
+          "threshold_lux": "Switch on below",
+          "timeout_s": "Switch off after the room is empty for",
+          "fade_out_s": "Fade out over",
+          "cooldown_s": "After lights are switched off by hand, ignore motion for",
+          "drift_s": "When the period changes, move to the new look over",
+          "self_fading": "Lights that fade by themselves"
+        },
+        "data_description": {
+          "lights": "The lights this room switches on and off.",
+          "triggers": "Any motion or presence sensor. When one of these sees someone and the room is dark enough, the lights come on.",
+          "holds": "Optional. These never switch the lights on, but keep them on while they see someone. Useful for a sensor that sometimes reports people who aren't there.",
+          "lux_sensor": "Optional. The room's own light level, only read while the room's lights are off.",
+          "threshold_lux": "Leave empty to switch on at any light level.",
+          "fade_out_s": "How long the lights take to go out at the end. 10 to 20 seconds is gentle enough not to notice from the corner of your eye; 0 switches straight off.",
+          "drift_s": "Only for a room that is lit when the period changes.",
+          "self_fading": "Optional. For lights whose own device fades them, such as a DALI gateway set to dim to off over a few seconds. These get a plain on or off and do their own fade. Lights that Home Assistant can fade are faded anyway; any others fade in small steps."
+        }
+      },
+      "remove_room": {
+        "title": "Remove a room",
+        "data": {
+          "room": "Room"
+        }
+      },
+      "periods": {
+        "title": "Periods",
+        "menu_options": {
+          "period_times": "Start times",
+          "add_period": "Add a period",
+          "pick_period": "Rename or remove a period"
+        }
+      },
+      "period_times": {
+        "title": "Start times",
+        "description": "Each period starts at its time and runs until the next one starts. Pick days that use different times, then give those times; any left empty keep the normal time.",
+        "data": {
+          "alt_days": "Days with different times"
+        }
+      },
+      "add_period": {
+        "title": "Add a period",
+        "description": "Rooms use the previous period's look in a new period until you save one for it.",
+        "data": {
+          "name": "Name",
+          "start": "Starts at",
+          "alt_start": "Starts at, on the days with different times"
+        }
+      },
+      "pick_period": {
+        "title": "Rename or remove a period",
+        "data": {
+          "period": "Period"
+        }
+      },
+      "edit_period": {
+        "title": "{period}",
+        "description": "Removing a period removes the rooms' looks for it; they then use the previous period's.",
+        "data": {
+          "name": "Name",
+          "start": "Starts at",
+          "alt_start": "Starts at, on the days with different times",
+          "remove": "Remove this period"
+        }
+      }
+    }
+  },
+  "entity": {
+    "select": {
+      "period": {
+        "name": "Period"
+      },
+      "mode": {
+        "name": "Mode",
+        "state": {
+          "off": "Off",
+          "log_only": "Log only",
+          "live": "Live"
+        }
+      }
+    },
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "idle": "Idle",
+          "owned": "Lights on by motion",
+          "manual": "Switched on by hand"
+        }
+      },
+      "ambient_lux": {
+        "name": "Light level"
+      }
+    },
+    "switch": {
+      "stealth_mode": {
+        "name": "Stealth mode"
+      }
+    }
+  },
+  "services": {
+    "set_look": {
+      "name": "Save a room look",
+      "description": "Saves what a room's lights should do in a period.",
+      "fields": {
+        "entity_id": {
+          "name": "Room",
+          "description": "The room's status sensor."
+        },
+        "period": {
+          "name": "Period",
+          "description": "Leave empty for the current period."
+        },
+        "look": {
+          "name": "Look",
+          "description": "'current' saves the room's lights as they are now; 'nothing' keeps the room dark in this period; 'borrow' removes the period's own look so it uses the previous period's."
+        }
+      }
+    }
+  }
+}

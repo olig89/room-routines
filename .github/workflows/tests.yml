@@ -1,0 +1,22 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: pip install -r requirements_test.txt
+      - run: python -m pytest -q
+      - name: core/ must not import Home Assistant
+        run: |
+          if grep -rnE "^\s*(from|import) homeassistant" custom_components/room_routines/core; then
+            echo "core/ imports homeassistant"; exit 1
+          fi

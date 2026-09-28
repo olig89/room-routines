@@ -1,0 +1,21 @@
+set_look:
+  fields:
+    entity_id:
+      required: true
+      selector:
+        entity:
+          integration: room_routines
+          domain: sensor
+    period:
+      required: false
+      selector:
+        text:
+    look:
+      required: false
+      default: current
+      selector:
+        select:
+          options:
+            - current
+            - nothing
+            - borrow
