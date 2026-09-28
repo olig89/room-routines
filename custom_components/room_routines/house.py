@@ -441,6 +441,12 @@ class House:
         self._schedule_next()
         for runner in self.rooms.values():
             runner.start()
+        # The entities wrote their first state before the next start was known.
+        self._announce()
+
+    def _announce(self) -> None:
+        async_dispatcher_send(self.hass, house_signal(self.entry.entry_id))
+        async_dispatcher_send(self.hass, ANY_SIGNAL)
 
     @callback
     def stop(self) -> None:
@@ -458,16 +464,16 @@ class House:
     @callback
     def _period_tick(self, now: datetime) -> None:
         self.overridden = False
-        self._set_period(self.schedule.current(now).name)
+        # Schedule first, so what _set_period announces carries the new next start.
         self._schedule_next()
+        self._set_period(self.schedule.current(now).name)
 
     def _set_period(self, name: str) -> None:
         if name != self.period:
             self.period = name
             for runner in self.rooms.values():
                 runner.period_changed(name)
-        async_dispatcher_send(self.hass, house_signal(self.entry.entry_id))
-        async_dispatcher_send(self.hass, ANY_SIGNAL)
+        self._announce()
 
     @callback
     def override_period(self, name: str) -> None:
@@ -482,8 +488,7 @@ class House:
         self.stealth = on
         for runner in self.rooms.values():
             runner.stealth_changed(on)
-        async_dispatcher_send(self.hass, house_signal(self.entry.entry_id))
-        async_dispatcher_send(self.hass, ANY_SIGNAL)
+        self._announce()
 
     @callback
     def take_looks(self, options: Mapping[str, Any]) -> bool:

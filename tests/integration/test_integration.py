@@ -422,3 +422,15 @@ async def test_stray_option_keys_are_dropped_on_setup(hass, lights):
     await hass.async_block_till_done()
     assert set(entry.options) == {"periods", "alt_days", "rooms"}
     assert hass.states.get(STATUS) is not None
+
+
+async def test_period_select_knows_the_next_change(hass, lights, freezer):
+    await setup(hass)
+    # Monday 20:30 Tallinn: Evening, and Overnight starts at 23:00.
+    assert hass.states.get(PERIOD).attributes["next_change"] == "2026-09-28T23:00:00+03:00"
+    freezer.move_to("2026-09-28 20:00:01+00:00")  # 23:00:01 Tallinn
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    state = hass.states.get(PERIOD)
+    assert state.state == "Overnight"
+    assert state.attributes["next_change"] == "2026-09-29T05:30:00+03:00"
