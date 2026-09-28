@@ -14,7 +14,6 @@ action (a sidebar page for them comes later).
 
 from __future__ import annotations
 
-import copy
 import uuid
 from typing import Any
 
@@ -47,10 +46,10 @@ from .core.serial import (
     DEFAULT_THRESHOLD_LUX,
     DEFAULT_TIMEOUT_S,
     first_look,
-    room_from,
     schedule_from,
     schedule_to,
 )
+from .settings import SettingsError, clean_room, set_periods
 from .suggest import room_suggestions
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -102,35 +101,6 @@ def detail_fields(defaults: dict[str, Any]) -> dict[Any, Any]:
         vol.Required("cooldown_s", **number("cooldown_s", DEFAULT_COOLDOWN_S)): _seconds(600),
         vol.Required("drift_s", **number("drift_s", DEFAULT_DRIFT_S)): _seconds(600),
     }
-
-
-def clean_room(user_input: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
-    """Stored room settings from the form. Raises ValueError if they don't make a room."""
-    room = copy.deepcopy(previous or {})
-    room.update(
-        name=str(user_input.get("name", room.get("name", ""))).strip(),
-        area_id=user_input.get("area_id", room.get("area_id")) or None,
-        lights=list(user_input.get("lights") or []),
-        triggers=list(user_input.get("triggers") or []),
-        holds=list(user_input.get("holds") or []),
-        lux_sensor=user_input.get("lux_sensor") or None,
-        threshold_lux=user_input.get("threshold_lux"),
-        timeout_s=int(user_input["timeout_s"]),
-        fade_out_s=int(user_input["fade_out_s"]),
-        cooldown_s=int(user_input["cooldown_s"]),
-        drift_s=int(user_input["drift_s"]),
-    )
-    # Only the room's own lights can be marked as fading by themselves.
-    room["self_fading"] = [light for light in user_input.get("self_fading") or [] if light in room["lights"]]
-    if not room["name"]:
-        raise ValueError("name")
-    # Looks may only mention the room's lights.
-    kept = set(room["lights"])
-    for look in (room.get("looks") or {}).values():
-        if "lights" in look:
-            look["lights"] = {light: t for light, t in look["lights"].items() if light in kept}
-    room_from(room)  # raises ValueError if it isn't a valid room
-    return room
 
 
 def _hhmm(value: Any) -> str | None:
@@ -266,14 +236,13 @@ class RoomRoutinesOptionsFlow(OptionsFlow):
             step_id="periods", menu_options=["period_times", "add_period", "pick_period"]
         )
 
-    def _save_periods(self, options: dict[str, Any], rows: list[dict], days: list[int]) -> ConfigFlowResult | None:
+    def _save_periods(
+        self, options: dict[str, Any], rows: list[dict], days: list[int], renames: dict[str, str | None] | None = None
+    ) -> ConfigFlowResult | None:
         try:
-            schedule_from({CONF_PERIODS: rows, CONF_ALT_DAYS: days})
-        except ValueError:
+            return self.async_create_entry(data=set_periods(options, rows, days, renames))
+        except SettingsError:
             return None
-        options[CONF_PERIODS] = rows
-        options[CONF_ALT_DAYS] = days
-        return self.async_create_entry(data=options)
 
     async def async_step_period_times(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         options = self._options()
@@ -352,13 +321,8 @@ class RoomRoutinesOptionsFlow(OptionsFlow):
             if (new_name is None or new_name) and rows:
                 # Rooms' looks follow the period: renamed with it, dropped with it
                 # (a dropped period's rooms then borrow the previous period's look).
-                for room in options[CONF_ROOMS].values():
-                    looks = room.get("looks") or {}
-                    if self._period in looks:
-                        look = looks.pop(self._period)
-                        if new_name:
-                            looks[new_name] = look
-                if (done := self._save_periods(options, rows, options.get(CONF_ALT_DAYS) or [])) is not None:
+                renames = {self._period: new_name}
+                if (done := self._save_periods(options, rows, options.get(CONF_ALT_DAYS) or [], renames)) is not None:
                     return done
             errors["base"] = "invalid_periods" if rows else "last_period"
         defaults = {"name": old["name"], "start": f"{old['start']}:00",

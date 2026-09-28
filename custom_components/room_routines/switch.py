@@ -24,11 +24,13 @@ async def async_setup_entry(
 
 class StealthSwitch(HouseEntity, SwitchEntity, RestoreEntity):
     _platform_domain = "switch"
+
     def __init__(self, house) -> None:
         super().__init__(house, "stealth_mode")
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+        self.house.stealth_entity_id = self.entity_id
         last = await self.async_get_last_state()
         if last is not None and last.state == STATE_ON:
             self.house.set_stealth(True)

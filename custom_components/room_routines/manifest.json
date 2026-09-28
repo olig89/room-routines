@@ -1,14 +1,25 @@
 {
   "domain": "room_routines",
   "name": "Room Routines",
-  "after_dependencies": ["logbook"],
-  "codeowners": ["@olig89"],
+  "after_dependencies": [
+    "frontend",
+    "logbook",
+    "panel_custom",
+    "recorder"
+  ],
+  "codeowners": [
+    "@olig89"
+  ],
   "config_flow": true,
+  "dependencies": [
+    "http",
+    "websocket_api"
+  ],
   "documentation": "https://github.com/olig89/room-routines",
   "integration_type": "service",
   "iot_class": "calculated",
   "issue_tracker": "https://github.com/olig89/room-routines/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.1.0"
+  "version": "0.2.0"
 }

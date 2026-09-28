@@ -6,23 +6,23 @@ them inside Home Assistant.
 
 from __future__ import annotations
 
-import copy
+from pathlib import Path
 from typing import Any
 
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import ATTR_ENTITY_ID, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN, Platform
+from homeassistant.const import ATTR_ENTITY_ID, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.typing import ConfigType
 
-from .const import DOMAIN, SERVICE_SET_LOOK, clean_options
-from .core.looks import OFF, LightTarget, Look
-from .core.room import RoomConfig
+from .const import ANY_SIGNAL, DOMAIN, NAME, PANEL_COMPONENT, PANEL_URL, SERVICE_SET_LOOK, STATIC_URL, clean_options
 from .core.serial import look_to
-from .house import House, brightness_pct, room_of
+from .house import House, capture, room_of
+from .websocket import async_register_websocket
 
 PLATFORMS = [Platform.SELECT, Platform.SENSOR, Platform.SWITCH]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -41,32 +41,33 @@ SET_LOOK_SCHEMA = vol.Schema(
     }
 )
 
-COLOUR_MODES = {"rgb", "rgbw", "rgbww", "hs", "xy"}
+async def _async_register_panel(hass: HomeAssistant) -> None:
+    """Sidebar page. Skipped quietly where the frontend isn't loaded (tests)."""
+    if hass.data.get(f"{DOMAIN}_panel") or "frontend" not in hass.config.components:
+        return
+    from homeassistant.components import panel_custom
+    from homeassistant.components.http import StaticPathConfig
 
-
-def capture(hass: HomeAssistant, config: RoomConfig) -> Look:
-    """The room's lights as they are now, as a look."""
-    lights: dict[str, LightTarget] = {}
-    for light in config.switchable():
-        state = hass.states.get(light)
-        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            continue
-        if state.state != STATE_ON:
-            lights[light] = OFF
-            continue
-        mode = state.attributes.get("color_mode")
-        kelvin = state.attributes.get("color_temp_kelvin") if mode == "color_temp" else None
-        rgb = state.attributes.get("rgb_color") if mode in COLOUR_MODES else None
-        lights[light] = LightTarget(
-            True,
-            brightness_pct(state),
-            int(kelvin) if kelvin else None,
-            tuple(int(c) for c in rgb) if rgb else None,
-        )
-    return Look(lights)
+    www = Path(__file__).parent / "www"
+    await hass.http.async_register_static_paths([StaticPathConfig(STATIC_URL, str(www), False)])
+    version = (await hass.async_add_executor_job((www / "room-routines-panel.js").stat)).st_mtime_ns
+    await panel_custom.async_register_panel(
+        hass,
+        frontend_url_path=PANEL_URL,
+        webcomponent_name=PANEL_COMPONENT,
+        sidebar_title=NAME,
+        sidebar_icon="mdi:lightbulb-auto",
+        module_url=f"{STATIC_URL}/room-routines-panel.js?v={version}",
+        # Admins only for now. The page itself hides the deeper settings from
+        # non-admins and the websocket refuses them, so opening it up later is
+        # just this flag.
+        require_admin=True,
+    )
+    hass.data[f"{DOMAIN}_panel"] = True
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    async_register_websocket(hass)
     async def set_look(call: ServiceCall) -> None:
         found = room_of(hass, call.data[ATTR_ENTITY_ID])
         if found is None:
@@ -121,6 +122,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: RoomRoutinesConfigEntry)
     house.start()
     entry.async_on_unload(house.stop)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+    await _async_register_panel(hass)
+    async_dispatcher_send(hass, ANY_SIGNAL)
     return True
 
 
@@ -131,4 +134,13 @@ async def _async_options_updated(hass: HomeAssistant, entry: RoomRoutinesConfigE
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: RoomRoutinesConfigEntry) -> bool:
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    async_dispatcher_send(hass, ANY_SIGNAL)
+    return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: RoomRoutinesConfigEntry) -> None:
+    if hass.data.pop(f"{DOMAIN}_panel", None):
+        from homeassistant.components import frontend
+
+        frontend.async_remove_panel(hass, PANEL_URL)

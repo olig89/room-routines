@@ -24,14 +24,19 @@ async def async_setup_entry(
 
 
 class PeriodSelect(HouseEntity, SelectEntity):
-    _platform_domain = "select"
     """Shows the current period; choosing one holds it until the next scheduled start."""
+
+    _platform_domain = "select"
 
     _attr_icon = "mdi:clock-time-four-outline"
 
     def __init__(self, house) -> None:
         super().__init__(house, "period")
         self._attr_options = list(house.schedule.order())
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.house.period_entity_id = self.entity_id
 
     @property
     def current_option(self) -> str:
@@ -58,6 +63,7 @@ class RoomModeSelect(RoomEntity, SelectEntity, RestoreEntity):
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+        self.runner.mode_entity_id = self.entity_id
         last = await self.async_get_last_state()
         self.runner.set_mode(last.state if last and last.state in MODES else MODE_LOG_ONLY)
 

@@ -43,7 +43,7 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, MODE_LIVE, MODE_LOG_ONLY, MODE_OFF, house_signal, room_signal
+from .const import ANY_SIGNAL, DOMAIN, MODE_LIVE, MODE_LOG_ONLY, MODE_OFF, house_signal, room_signal
 from .core.fade import plan_fade
 from .core.looks import OFF, LightTarget, Look
 from .core.matching import Command, OwnChangeMatcher
@@ -87,6 +87,7 @@ class RoomRunner:
         self.matcher = OwnChangeMatcher()
         self.room: Room | None = None
         self.status_entity_id: str | None = None
+        self.mode_entity_id: str | None = None
         self._unsubs: list[CALLBACK_TYPE] = []
         self._wake: CALLBACK_TYPE | None = None
         self._fades: list[CALLBACK_TYPE] = []
@@ -263,6 +264,7 @@ class RoomRunner:
 
     def _notify(self) -> None:
         async_dispatcher_send(self.hass, room_signal(self.house.entry.entry_id, self.room_id))
+        async_dispatcher_send(self.hass, ANY_SIGNAL)
 
     async def _log(self, message: str) -> None:
         if "logbook" not in self.hass.config.components:
@@ -373,6 +375,31 @@ class RoomRunner:
             )
 
 
+COLOUR_MODES = {"rgb", "rgbw", "rgbww", "hs", "xy"}
+
+
+def capture(hass: HomeAssistant, config: RoomConfig) -> Look:
+    """The room's lights as they are now, as a look."""
+    lights: dict[str, LightTarget] = {}
+    for light in config.switchable():
+        state = hass.states.get(light)
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            continue
+        if state.state != STATE_ON:
+            lights[light] = OFF
+            continue
+        mode = state.attributes.get("color_mode")
+        kelvin = state.attributes.get("color_temp_kelvin") if mode == "color_temp" else None
+        rgb = state.attributes.get("rgb_color") if mode in COLOUR_MODES else None
+        lights[light] = LightTarget(
+            True,
+            brightness_pct(state),
+            int(kelvin) if kelvin else None,
+            tuple(int(c) for c in rgb) if rgb else None,
+        )
+    return Look(lights)
+
+
 def rooms_from(options: Mapping[str, Any]) -> dict[str, RoomSetup]:
     rooms = {}
     for room_id, data in (options.get("rooms") or {}).items():
@@ -404,6 +431,8 @@ class House:
         self.next_start: datetime | None = None
         self.overridden = False
         self.stealth = False
+        self.period_entity_id: str | None = None
+        self.stealth_entity_id: str | None = None
         self.rooms = {rid: RoomRunner(self, setup) for rid, setup in rooms_from(self.options).items()}
         self._unsub_period: CALLBACK_TYPE | None = None
 
@@ -438,6 +467,7 @@ class House:
             for runner in self.rooms.values():
                 runner.period_changed(name)
         async_dispatcher_send(self.hass, house_signal(self.entry.entry_id))
+        async_dispatcher_send(self.hass, ANY_SIGNAL)
 
     @callback
     def override_period(self, name: str) -> None:
@@ -453,6 +483,7 @@ class House:
         for runner in self.rooms.values():
             runner.stealth_changed(on)
         async_dispatcher_send(self.hass, house_signal(self.entry.entry_id))
+        async_dispatcher_send(self.hass, ANY_SIGNAL)
 
     @callback
     def take_looks(self, options: Mapping[str, Any]) -> bool:
