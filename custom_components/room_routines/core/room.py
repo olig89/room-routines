@@ -31,8 +31,8 @@ down and goes dark as normal. Nothing else changes: periods, looks and blinds
 carry on. When stealth ends the sensors count again; one that sees someone at
 that moment acts like fresh motion.
 
-Dark days: the house tells every room which *track* it is on (Normal or Dim);
-a room uses its Dim look for the period where it has one. A track change in a
+Dark Days: the house tells every room which *track* it is on (Normal or Dark Day);
+a room uses its Dark Day look for the period where it has one. A track change in a
 lit room drifts to the new look, as a period change does.
 
 Hand changes: when someone changes a light the room switched on (dims it,
@@ -167,7 +167,7 @@ class Room:
         self.schedule = schedule
         self.period = period
         self.track = track
-        self.auto_dim = auto_dim  # house-wide: Normal looks at this factor on Dim days
+        self.auto_dim = auto_dim  # house-wide: Normal looks at this factor on Dark Days
         self.owned_at: datetime | None = None
         self.ambient = ambient or AmbientTracker()
         if lights_on:
@@ -200,7 +200,8 @@ class Room:
         return self.source().look
 
     def dim_factor(self) -> float:
-        """Auto-dim for the look in use: on a Dim day, a Normal look is turned down."""
+        """Dark Day brightness for the look in use: on a Dark Day, a Normal look is
+        turned down (or up)."""
         if self.track != NORMAL and self.source().track == NORMAL:
             return self.auto_dim
         return 1.0
@@ -217,7 +218,7 @@ class Room:
         dim = self.source().track != NORMAL
         factor = self.dim_factor()
         auto = f" at {round(factor * 100)} %" if factor != 1.0 else ""
-        return f"{self.period} {'Dim ' if dim else ''}look{auto}"
+        return f"{self.period} look{' for Dark Days' if dim else ''}{auto}"
 
     def _power_for(self, look: Look) -> tuple[str, ...]:
         return tuple(sorted({self.config.powered_by[b] for b in look.lit() if b in self.config.powered_by}))
@@ -332,7 +333,7 @@ class Room:
         if track == self.track:
             return self._unchanged()
         self.track = track
-        return self._restyle(f"{TRACK_LABELS.get(track, track)} day", blinds=False)
+        return self._restyle(TRACK_LABELS.get(track, track), blinds=False)
 
     def _restyle(self, reason: str, blinds: bool) -> Decision:
         """The look changed under the room: move a lit room to it."""

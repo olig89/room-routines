@@ -13,6 +13,7 @@ def auto_enable_custom_integrations(enable_custom_integrations):
 @pytest.fixture
 async def tallinn(hass: HomeAssistant):
     await hass.config.async_set_time_zone("Europe/Tallinn")
+    hass.config.latitude, hass.config.longitude = 59.44, 24.75
 
 
 class LightCalls:

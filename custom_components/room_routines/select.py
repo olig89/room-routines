@@ -1,4 +1,4 @@
-"""The house's current period and track (Normal or Dim day), and each room's mode."""
+"""The house's current period and whether it is a Normal day or a Dark Day, and each room's mode."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ class PeriodSelect(HouseEntity, SelectEntity):
 
 
 class TrackSelect(HouseEntity, SelectEntity):
-    """Normal or Dim day, from the light sensor; choosing one holds it until the next period."""
+    """Normal day or Dark Day; choosing one holds it until the next period."""
 
     _platform_domain = "select"
     _attr_options = list(TRACKS)
@@ -77,12 +77,19 @@ class TrackSelect(HouseEntity, SelectEntity):
 
     @property
     def extra_state_attributes(self) -> dict:
-        level, sensor = self.house.light_level()
+        status = self.house.dark_day_status()
         return {
-            "light_level": None if level is None else round(level),
-            "light_sensor": sensor,
-            "dim_below": self.house.tracks.dim_below,
-            "normal_above": self.house.tracks.normal_above,
+            "clear_day_pct": status["pct"],
+            "source": status["source"],
+            "reason": status["reason"],
+            "weather_pct": status["weather_pct"],
+            "light_sensor_pct": status["sensor_pct"],
+            "light_level": status["level"],
+            "light_sensor": status["level_sensor"],
+            "dark_below_pct": self.house.tracks.dark_below,
+            "normal_above_pct": self.house.tracks.normal_above,
+            "dark_day_periods": status["periods"],
+            "sun_elevation": status["sun_elevation"],
             "chosen_by_hand": self.house.chooser.by_hand,
             "enabled": self.house.tracks.enabled,
         }

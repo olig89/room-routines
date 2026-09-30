@@ -13,8 +13,9 @@ its lights (it assumes its commands worked), and real light changes are not fed
 in, so what it logs is what it would have done. **Off** ignores everything.
 
 The house keeps the current period (with a timer for the next one), the
-stealth switch and the day's track (Normal or Dim, from one light sensor), and
-passes them to every room. It also keeps the log of hand changes (in Home
+stealth switch and whether today is a Normal day or a Dark Day (from the
+weather and/or a light sensor, see ``core/tracks.py``), and passes them to
+every room. It also keeps the log of hand changes (in Home
 Assistant's storage) that the page's suggestions come from.
 
 A look can be a Home Assistant scene. Turning it on is Home Assistant's job;
@@ -45,10 +46,12 @@ from homeassistant.const import (
 )
 from homeassistant.core import CALLBACK_TYPE, Context, Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_point_in_time,
     async_track_state_change_event,
+    async_track_time_change,
     async_track_time_interval,
 )
 from homeassistant.helpers.storage import Store
@@ -73,13 +76,18 @@ from .core.room import (
     WakeAt,
 )
 from .core.serial import room_from, schedule_from, tracks_from
-from .core.tracks import TrackChooser
+from .core.daylight import MIN_ELEVATION, DaylightReference
+from .core.sun import SunPosition, clear_sky, position
+from .core.tracks import TrackChooser, default_periods
 
 _LOGGER = logging.getLogger(__name__)
 
 BULB_WAIT = timedelta(seconds=10)  # how long to wait for smart bulbs after powering their circuit
 SETTLE = timedelta(seconds=10)  # after a hand change, when to read how the lights ended up
 TRACK_CHECK = timedelta(minutes=1)
+WEATHER_EVERY = timedelta(minutes=15)
+WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
+LEARN_DAYS = 10  # Home Assistant keeps 5-minute statistics for about this long
 KEEP_CHANGES = timedelta(days=60)
 MAX_CHANGES = 2000
 DISMISS_FOR = timedelta(days=28)
@@ -166,7 +174,7 @@ class RoomRunner:
         lights_on = self.mode == MODE_LIVE and self._any_on()
         self.room = Room(
             self.config, self.house.schedule, self.house.period, lights_on, now,
-            stealth=self.house.stealth, track=self.house.track, auto_dim=self.house.tracks.auto_dim,
+            stealth=self.house.stealth, track=self.house.track, auto_dim=self.house.tracks.factor,
         )
         for sensor in (*self.config.triggers, *self.config.holds):
             state = self.hass.states.get(sensor)
@@ -348,7 +356,7 @@ class RoomRunner:
                 return None
             look = Look(lights)
         if track != source.track:
-            look = scaled(look, self.house.tracks.auto_dim)
+            look = scaled(look, self.house.tracks.factor)
         return look
 
     def _notify(self) -> None:
@@ -619,6 +627,9 @@ class House:
         self.changes: list[Change] = []
         self.dismissed: dict[str, str] = {}  # suggestion key -> hidden until (ISO)
         self._store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, f"{DOMAIN}.habits")
+        self._daylight_store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, f"{DOMAIN}.daylight")
+        self._learned: dict[str, datetime] = {}  # sensor -> statistics read up to
+        self.weather: dict[str, Any] = {}  # the last weather answer, for the page
         self.rooms = {rid: RoomRunner(self, setup) for rid, setup in rooms_from(self.options).items()}
         self._unsub_period: CALLBACK_TYPE | None = None
         self._unsubs: list[CALLBACK_TYPE] = []
@@ -635,6 +646,14 @@ class House:
             except (KeyError, ValueError, TypeError):
                 continue
         self.dismissed = dict(data.get("dismissed") or {})
+        daylight = await self._daylight_store.async_load() or {}
+        for sensor, row in (daylight.get("sensors") or {}).items():
+            try:
+                self.chooser.references[sensor] = DaylightReference.from_dict(row.get("table"))
+                if (at := dt_util.parse_datetime(row.get("learned") or "")) is not None:
+                    self._learned[sensor] = at
+            except (ValueError, TypeError, AttributeError):
+                continue
 
     @callback
     def start(self) -> None:
@@ -659,18 +678,36 @@ class House:
         for runner in self.rooms.values():
             runner.stop()
 
-    # -- Normal and Dim days --
+    # -- Normal days and Dark Days --
+
+    def dark_periods(self) -> tuple[str, ...]:
+        if self.tracks.periods is not None:
+            return self.tracks.periods
+        return default_periods({p.name: p.start for p in self.schedule.periods})
+
+    def sun(self, now: datetime) -> SunPosition:
+        return position(self.hass.config.latitude, self.hass.config.longitude, now)
 
     def _start_tracks(self) -> None:
-        sensors = [s for s in (self.tracks.sensor, self.tracks.fallback) if s]
-        if not sensors:
-            return
         now = dt_util.now()
+        if not self.tracks.enabled:
+            self.chooser.update(now, self.sun(now), False, first=True)
+            return
+        sensors = [s for s in (self.tracks.sensor, self.tracks.fallback) if s]
         for sensor in sensors:
             self._track_reading(sensor, self.hass.states.get(sensor), now)
-        self.chooser.update(now, first=True)
-        self._unsubs.append(async_track_state_change_event(self.hass, sensors, self._on_track_sensor))
+        if sensors:
+            self._unsubs.append(async_track_state_change_event(self.hass, sensors, self._on_track_sensor))
+            self._unsubs.append(async_track_time_change(self.hass, self._learn_daily, hour=3, minute=17, second=0))
+            self._background(self._learn(), "learn what a clear day looks like")
+        if self.tracks.weather:
+            self._unsubs.append(async_track_time_interval(self.hass, self._weather_tick, WEATHER_EVERY))
+            self._background(self._fetch_weather(), "fetch the weather")
+        self._check_track(now, first=True)
         self._unsubs.append(async_track_time_interval(self.hass, self._track_tick, TRACK_CHECK))
+
+    def _background(self, coro, name: str) -> None:
+        self.entry.async_create_background_task(self.hass, coro, f"{DOMAIN}: {name}")
 
     def _track_reading(self, sensor: str, state, now: datetime) -> None:
         value: float | None
@@ -684,14 +721,17 @@ class House:
     def _on_track_sensor(self, event: Event[EventStateChangedData]) -> None:
         now = dt_util.now()
         self._track_reading(event.data["entity_id"], event.data["new_state"], now)
-        self._track_tick(now)
+        self._check_track(now)
 
     @callback
-    def _track_tick(self, now: datetime) -> None:
-        if self.chooser.update(dt_util.now()):
+    def _track_tick(self, _now: datetime) -> None:
+        self._check_track(dt_util.now())
+
+    def _check_track(self, now: datetime, first: bool = False) -> None:
+        if self.chooser.update(now, self.sun(now), self.period in self.dark_periods(), first=first):
             self._set_track()
         else:
-            self._announce()  # the light level shown moves on
+            self._announce()  # the reading shown moves on
 
     def _set_track(self) -> None:
         for runner in self.rooms.values():
@@ -707,7 +747,122 @@ class House:
             self._announce()
 
     def light_level(self) -> tuple[float | None, str | None]:
-        return self.chooser.level(dt_util.now())
+        return self.chooser.sensor_level(dt_util.now())
+
+    def dark_day_status(self) -> dict[str, Any]:
+        """What the page shows about today."""
+        now = dt_util.now()
+        sun = self.sun(now)
+        reading = self.chooser.current(now, sun)
+        weather = self.chooser.weather_reading(now)
+        sensor = self.chooser.sensor_reading(now, sun)
+        return {
+            "enabled": self.tracks.enabled,
+            "periods": list(self.dark_periods()),
+            "active": self.period in self.dark_periods(),
+            "reason": self.chooser.reason,
+            "pct": reading.pct,
+            "source": reading.source,
+            "weather_pct": weather.pct,
+            "cloud_cover": self.weather.get("cloud_cover") if weather.pct is not None else None,
+            "sensor_pct": sensor.pct,
+            "level": round(sensor.lux) if sensor.lux is not None else None,
+            "level_sensor": sensor.sensor,
+            "learned": {s: r.learned for s, r in self.chooser.references.items()},
+            "sun_elevation": round(sun.elevation, 1),
+            "sun_down": sun.elevation < MIN_ELEVATION,
+        }
+
+    # -- the weather --
+
+    @callback
+    def _weather_tick(self, _now: datetime) -> None:
+        self._background(self._fetch_weather(), "fetch the weather")
+
+    async def _fetch_weather(self) -> None:
+        """Open-Meteo's current sunlight at Home Assistant's location, as percent
+        of a clear sky. No key needed; four calls an hour."""
+        lat, lon = self.hass.config.latitude, self.hass.config.longitude
+        params = {
+            "latitude": f"{lat:.3f}",
+            "longitude": f"{lon:.3f}",
+            "current": "shortwave_radiation,cloud_cover",
+            "timezone": "GMT",
+        }
+        try:
+            async with asyncio.timeout(30):
+                resp = await async_get_clientsession(self.hass).get(WEATHER_URL, params=params)
+                resp.raise_for_status()
+                data = await resp.json()
+            current = data["current"]
+            radiation = float(current["shortwave_radiation"])
+            interval = int(current.get("interval") or 900)
+            at = datetime.fromisoformat(current["time"]).replace(tzinfo=dt_util.UTC)
+            cloud = current.get("cloud_cover")
+        except Exception as err:  # noqa: BLE001 - any failure: keep the last answer until it's stale
+            _LOGGER.debug("Couldn't get the weather from Open-Meteo: %s", err)
+            return
+        self.take_weather(radiation, at, interval, cloud)
+
+    def take_weather(self, radiation: float, at: datetime, interval: int = 900, cloud: Any = None) -> None:
+        """A weather answer: the sunlight (W/m²) averaged over ``interval``
+        seconds before ``at``."""
+        lat, lon = self.hass.config.latitude, self.hass.config.longitude
+        sun = position(lat, lon, at - timedelta(seconds=interval / 2))
+        clear = clear_sky(sun.elevation)
+        pct = round(100 * radiation / clear, 1) if sun.elevation >= MIN_ELEVATION and clear > 0 else None
+        self.weather = {"radiation": radiation, "clear": round(clear), "cloud_cover": cloud, "pct": pct}
+        self.chooser.weather(pct, dt_util.now())
+        self._check_track(dt_util.now())
+
+    # -- what a clear day looks like to the light sensor --
+
+    @callback
+    def _learn_daily(self, _now: datetime) -> None:
+        self._background(self._learn(), "learn what a clear day looks like")
+
+    async def _learn(self) -> None:
+        """Read the sensors' 5-minute statistics since the last time and fold them
+        into their clear-day reference."""
+        if "recorder" not in self.hass.config.components:
+            return
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.statistics import statistics_during_period
+
+        lat, lon = self.hass.config.latitude, self.hass.config.longitude
+        end = dt_util.utcnow()
+        for sensor in (s for s in (self.tracks.sensor, self.tracks.fallback) if s):
+            last = self._learned.get(sensor)
+            start = max(last, end - timedelta(days=LEARN_DAYS)) if last else end - timedelta(days=LEARN_DAYS)
+            try:
+                rows = await get_instance(self.hass).async_add_executor_job(
+                    statistics_during_period, self.hass, start, end, {sensor}, "5minute", None, {"mean"}
+                )
+            except Exception as err:  # noqa: BLE001 - no statistics: the sensor just can't be used yet
+                _LOGGER.debug("Couldn't read statistics for %s: %s", sensor, err)
+                continue
+            samples = []
+            for row in rows.get(sensor, []):
+                if (mean := row.get("mean")) is None:
+                    continue
+                begin = row["start"]
+                if isinstance(begin, (int, float)):
+                    begin = datetime.fromtimestamp(begin, dt_util.UTC)
+                sun = position(lat, lon, begin + timedelta(minutes=2.5))
+                samples.append((sun.elevation, sun.morning, float(mean)))
+            reference = self.chooser.references.setdefault(sensor, DaylightReference())
+            reference.learn(samples, (end - last).total_seconds() / 86400 if last else 0.0)
+            self._learned[sensor] = end
+        self._daylight_store.async_delay_save(
+            lambda: {
+                "sensors": {
+                    s: {"table": r.to_dict(), "learned": self._learned[s].isoformat() if s in self._learned else None}
+                    for s, r in self.chooser.references.items()
+                }
+            },
+            5,
+        )
+        self._check_track(dt_util.now())
 
     # -- hand changes --
 
@@ -747,9 +902,10 @@ class House:
         # Schedule first, so what _set_period announces carries the new next start.
         self._schedule_next()
         self._set_period(self.schedule.current(now).name)
-        # A track chosen by hand also holds only until the next period.
-        if self.chooser.release(dt_util.now()):
-            self._set_track()
+        # A day chosen by hand also holds only until the next period, and each
+        # period start picks the day straight away.
+        self.chooser.release()
+        self._check_track(dt_util.now(), first=True)
 
     def _set_period(self, name: str) -> None:
         if name != self.period:

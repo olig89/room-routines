@@ -174,20 +174,10 @@ def snapshot(hass: HomeAssistant) -> dict[str, Any]:
             "track": house.track,
             "track_entity": house.track_entity_id,
             "track_by_hand": house.chooser.by_hand,
-            "tracks": {
-                **tracks_to(house.tracks),
-                "enabled": house.tracks.enabled,
-                "level": _level(house),
-                "level_sensor": house.light_level()[1],
-            },
+            "tracks": {**tracks_to(house.tracks), **house.dark_day_status()},
         },
         "rooms": [room_snapshot(hass, runner) for runner in house.rooms.values()],
     }
-
-
-def _level(house: House) -> float | None:
-    level, _ = house.light_level()
-    return None if level is None else round(level)
 
 
 # ---- live view -----------------------------------------------------------------
@@ -438,11 +428,15 @@ def ws_save_periods(hass: HomeAssistant, connection: websocket_api.ActiveConnect
 @websocket_api.websocket_command(
     {
         vol.Required("type"): f"{DOMAIN}/save_tracks",
+        vol.Optional("on", default=False): bool,
+        vol.Optional("weather", default=True): bool,
         vol.Optional("sensor"): vol.Any(None, str),
         vol.Optional("fallback"): vol.Any(None, str),
-        vol.Optional("dim_below", default=800): vol.All(vol.Coerce(float), vol.Range(min=0, max=200000)),
-        vol.Optional("normal_above", default=1500): vol.All(vol.Coerce(float), vol.Range(min=0, max=200000)),
-        vol.Optional("auto_dim_pct", default=100): vol.All(vol.Coerce(float), vol.Range(min=1, max=100)),
+        vol.Optional("first", default="weather"): vol.In(["weather", "sensor"]),
+        vol.Optional("periods"): vol.Any(None, [str]),
+        vol.Optional("dark_below_pct", default=40): vol.All(vol.Coerce(float), vol.Range(min=0, max=200)),
+        vol.Optional("normal_above_pct", default=55): vol.All(vol.Coerce(float), vol.Range(min=0, max=200)),
+        vol.Optional("brightness_pct", default=100): vol.All(vol.Coerce(float), vol.Range(min=1, max=300)),
     }
 )
 @websocket_api.require_admin

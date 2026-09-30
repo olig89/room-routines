@@ -4,21 +4,22 @@ Motion lights that follow your household's daily routine, for Home Assistant.
 
 Each room switches to the look chosen for the current period of the day
 (overnight, early morning, morning, day, evening) when someone arrives, if the
-room is dark enough, and switches off when they leave. On dark days (from one
-light sensor for the house) rooms can use a second, Dim set of looks. A look can
+room is dark enough, and switches off when they leave. On Dark Days (grey days,
+judged from the weather and/or a light sensor) rooms can use a second set of
+looks, or their usual looks dimmer or brighter. A look can
 be a Home Assistant scene. A light switched on by hand is left alone, and changes
 made by hand are remembered so the page can suggest better looks or times. Each
 room can run in log-only mode first.
 
-**Status: early development (0.3.1).** Install through HACS as a custom repository.
+**Status: early development (0.4.0).** Install through HACS as a custom repository.
 
 ## What you get
 
 - **A sidebar page** (admins only for now):
   - **Rooms**: each room's mode, what it's doing and why, the switch-off countdown, its light level against the threshold, its sensors (lit when they see someone), its lights and the look for the current period.
-  - **Room detail**: a looks table (period × light) for Normal and for Dim days, with *Save as now* (saves the lights as a Home Assistant scene through the scene editor's own API, so the same scene can go on a wall button), *Pick a scene*, *Edit*, *Keep dark* and *Use previous* / *Use Normal*; suggestions from how the lights get changed by hand; what the room did, from Home Assistant's history; and for rooms in log-only, a **dry-run check** that pairs every switch the room would have made with the light's real switch and scores the match.
-  - **Your day**: the periods as a 24-hour strip, with a row for days that start differently, and whether today is a Normal or Dim day.
-  - **Settings** (administrators only, and refused to anyone else by the server): add, change or remove rooms, with lights and sensors suggested from the area and any entity choosable; change, add, rename or remove periods (rooms' looks follow a renamed period); the dark-day light sensor (and a backup) and its thresholds.
+  - **Room detail**: a looks table (period × light) for Normal days and for Dark Days, with *Save as now* (saves the lights as a Home Assistant scene through the scene editor's own API, so the same scene can go on a wall button), *Pick a scene*, *Edit*, *Keep dark* and *Use previous* / *Use Normal*; suggestions from how the lights get changed by hand; what the room did, from Home Assistant's history; and for rooms in log-only, a **dry-run check** that pairs every switch the room would have made with the light's real switch and scores the match.
+  - **Your day**: the periods as a 24-hour strip, with a row for days that start differently, and whether today is a Normal day or a Dark Day, and why.
+  - **Settings** (administrators only, and refused to anyone else by the server): add, change or remove rooms, with lights and sensors suggested from the area and any entity choosable; change, add, rename or remove periods (rooms' looks follow a renamed period); Dark Days (where the reading comes from, which periods, the thresholds and the brightness).
   - A header with the current period, a stealth switch, and a banner across the page while stealth is on.
 - **Setup** creates five periods (overnight 23:00, early morning 05:30, morning
   07:00, day 09:00, evening 17:00). In the settings you can change the times,
@@ -35,17 +36,28 @@ room can run in log-only mode first.
 - **Per room:** a *Status* sensor (idle / lights on by motion / switched on by
   hand, with the reason), a *Mode* select (off / log only / live; new rooms start
   in log only) and a *Light level* sensor (the held ambient value).
-- **Dark days:** one light sensor (outdoors, or indoors facing out of a window)
-  picks a *Normal* or *Dim* day: its level averaged over 15 minutes (weighted by
-  time, for sensors that only report changes), Dim below one threshold, Normal
-  again only above a higher one, and at least 20 minutes on each. An unavailable
-  sensor keeps the current day (or uses the backup sensor). A period without a
-  Dim look uses its Normal one, and a lit room drifts to the new look when the
-  day turns.
-  **Auto-dim** (optional): on a Dim day, a period without a Dim look uses its
-  Normal look turned down (at 50 %, a light at 66 % comes on at 33 %). Lights
-  at their last brightness, and scenes from other apps (the Hue app), can't be
-  dimmed; the page marks those scenes.
+- **Dark Days:** a day counts as dark by comparing the light now with a
+  *clear* day at the same height of the sun, so an ordinary evening or a bright
+  cloudy day isn't dark. Two sources, one checked first (your choice) and the
+  other when it has no answer:
+  - **the weather** (default, enough on its own): the sunlight reaching the
+    ground at Home Assistant's location, from [Open-Meteo](https://open-meteo.com)
+    (free, no account, asked four times an hour), against a clear-sky model;
+  - **a light sensor** (optional, with a backup): its 15-minute average against
+    what it reads on a clear day at that sun height, learned once a day from its
+    own statistics in Home Assistant's recorder (so it needs a few days, and one
+    bright one, before it can answer).
+  Dark Days only happen in the periods you choose (by default the ones starting
+  between 06:00 and 15:00); in them, the sun being down counts as dark. Below 40 %
+  of a clear day it becomes a Dark Day, above 55 % Normal again, and each holds
+  for at least 20 minutes. No reading keeps the current day. A period without
+  its own Dark Day look uses its Normal one, and a lit room drifts to the new
+  look when the day turns.
+  **Brightness** (optional): on a Dark Day, a period without its own Dark Day
+  look uses its Normal look at this brightness: below 100 % dims (at 50 %, a
+  light at 66 % comes on at 33 %), above 100 % brightens, but only up to each
+  light's maximum. Lights at their last brightness, and scenes from other apps
+  (the Hue app), are left as they are; the page marks those scenes.
 - **Scenes:** any Home Assistant scene can be a look. For scenes made in Home
   Assistant, Room Routines reads the settings, so lights without a native
   transition still drift in steps and the result is recognised as its own; a
@@ -57,14 +69,14 @@ room can run in log-only mode first.
   later), or save the latest change as the look. *Not now* hides one for four
   weeks.
 - **House-wide:** a *Period* select (choose one by hand to hold it until the next
-  scheduled start), a *Track* select (Normal or Dim day, with the light level;
-  choose one by hand to hold it until the next period) and a *Stealth mode* switch (every motion sensor reads as
+  scheduled start), a *Day* select (Normal day or Dark Day, with the reading and
+  the reason; choose one by hand to hold it until the next period) and a *Stealth mode* switch (every motion sensor reads as
   "nobody here"; lit rooms still go dark).
 - **Looks:** a new room switches every light on at its last brightness in every
   period. Set the lights how you want them and run the **Save a room look**
   action (`room_routines.set_look`) for the period; "scene" turns on a scene; "nothing" keeps
   the room dark in a period; "borrow" makes it use the previous period's look
-  (on the Dim track: the period's Normal look). Saving a look doesn't restart
+  (on the Dark Day track, `dim`: the period's Normal look). Saving a look doesn't restart
   anything.
 
 ## Development

@@ -95,7 +95,7 @@ def test_dim_days_are_counted_apart_from_normal_ones():
     changes = [change(d, 12, pct=70, track=DIM) for d in (25, 26, 27, 28)]
     [s] = run(changes)
     assert s.track == DIM
-    assert "on Dim days" in s.text
+    assert "on Dark Days" in s.text
 
 
 def test_old_changes_are_forgotten():

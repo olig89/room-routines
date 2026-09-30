@@ -99,7 +99,7 @@ def _days(changes: list[Change]) -> int:
 
 
 def _where(period: str, track: str) -> str:
-    return f"{period}{' on Dim days' if track != NORMAL else ''}"
+    return f"{period}{' on Dark Days' if track != NORMAL else ''}"
 
 
 def suggest(
@@ -171,7 +171,7 @@ def suggest(
         out.append(Suggestion(
             f"{room_id}|{period}|{track}|{SAVE_LOOK}", room_id, SAVE_LOOK, period, track, count, days,
             f"{room_name}'s lights were changed by hand {count} times on {days} days in {where}. "
-            f"Save the latest change as the {period}{' Dim' if track != NORMAL else ''} look?",
+            f"Save the latest change as the {period} look{' for Dark Days' if track != NORMAL else ''}?",
             look=Look(dict(latest.lights)),
         ))
     out.sort(key=lambda s: -s.count)

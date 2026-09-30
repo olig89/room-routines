@@ -10,8 +10,8 @@ built and kept in Home Assistant and shared with wall buttons and dashboards.
 A look can also be "do nothing" (``NOTHING``): the room stays dark in that
 period. A period with no look of its own borrows the previous period's.
 
-Each room has a Normal set of looks and, optionally, a Dim set for dark days
-(see ``tracks``). A period without a Dim look uses its Normal one.
+Each room has a Normal set of looks and, optionally, a Dark Day set
+(see ``tracks``). A period without a Dark Day look uses its Normal one.
 
 Blinds can be listed in a look, but they are never moved by motion; the room
 only moves them when a new period starts, and only if the room asks for it.
@@ -82,8 +82,8 @@ def resolve(
 ) -> LookSource:
     """The room's look for ``period`` on ``track``.
 
-    Walks back through the periods like ``look_for``. On the Dim track a
-    period's Dim look wins; a period with only a Normal look uses that, so Dim
+    Walks back through the periods like ``look_for``. On a Dark Day a
+    period's Dark Day look wins; a period with only a Normal look uses that, so Dark Day
     looks are only needed where they differ.
     """
     name = period

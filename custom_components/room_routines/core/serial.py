@@ -5,7 +5,9 @@ The config entry's options hold plain JSON:
     {
       "periods": [{"name": "Overnight", "start": "23:00", "alt_start": null}, ...],
       "alt_days": [5, 6],
-      "tracks": {"sensor": "sensor.window_lux", "fallback": null, "dim_below": 800, "normal_above": 1500, "auto_dim_pct": 50},
+      "tracks": {"on": true, "weather": true, "sensor": "sensor.window_lux", "fallback": null,
+                 "first": "weather", "periods": ["Morning", "Day"],
+                 "dark_below_pct": 40, "normal_above_pct": 55, "brightness_pct": 50},
       "rooms": {
         "<room id>": {
           "name": "Downstairs Toilet",
@@ -16,12 +18,12 @@ The config entry's options hold plain JSON:
           "powered_by": {"<bulb>": "<power circuit>"},
           "blinds_with_periods": false,
           "looks": {"<period>": {"nothing": true} | {"scene": "scene.x"} | {"lights": {...}, "blinds": {...}}},
-          "dim_looks": {"<period>": ...}   (same form; the Dim track, for dark days)
+          "dim_looks": {"<period>": ...}   (same form; the Dark Day track)
         }
       }
     }
 
-No "tracks" (or no sensor in it) means every room stays on Normal.
+No "tracks" (or "on" false) means every day is a Normal day.
 
 A look's light is ``{"on": true, "brightness_pct": 60, "color_temp_kelvin": 2700}``;
 ``brightness_pct`` left out means "on at its last brightness".
@@ -36,7 +38,7 @@ from typing import Any
 from .looks import NOTHING, LightTarget, Look
 from .periods import Period, Schedule, default_schedule
 from .room import RoomConfig
-from .tracks import DEFAULT_AUTO_DIM_PCT, DEFAULT_DIM_BELOW, DEFAULT_NORMAL_ABOVE, TrackSettings
+from .tracks import DEFAULT_BRIGHTNESS_PCT, DEFAULT_DARK_BELOW, DEFAULT_NORMAL_ABOVE, WEATHER, TrackSettings
 
 DEFAULT_THRESHOLD_LUX = 50.0
 DEFAULT_TIMEOUT_S = 30
@@ -160,20 +162,33 @@ def first_look(lights: list[str], schedule: Schedule) -> dict[str, Any]:
 
 def tracks_from(options: Mapping[str, Any]) -> TrackSettings:
     data = options.get("tracks") or {}
+    periods = data.get("periods")
+    # 0.3.x stored lux thresholds (dim_below/normal_above) and auto_dim_pct:
+    # the thresholds don't carry over (they were lux, these are percent of a
+    # clear day), auto-dim becomes the Dark Day brightness, and a house that
+    # had a sensor chosen keeps Dark Days on.
     return TrackSettings(
+        on=bool(data.get("on", bool(data.get("sensor") or data.get("fallback")))),
+        weather=bool(data.get("weather", True)),
         sensor=data.get("sensor") or None,
         fallback=data.get("fallback") or None,
-        dim_below=float(data.get("dim_below", DEFAULT_DIM_BELOW)),
-        normal_above=float(data.get("normal_above", DEFAULT_NORMAL_ABOVE)),
-        auto_dim_pct=float(data.get("auto_dim_pct", DEFAULT_AUTO_DIM_PCT)),
+        first=str(data.get("first", WEATHER)),
+        periods=tuple(str(p) for p in periods) if periods is not None else None,
+        dark_below=float(data.get("dark_below_pct", DEFAULT_DARK_BELOW)),
+        normal_above=float(data.get("normal_above_pct", DEFAULT_NORMAL_ABOVE)),
+        brightness_pct=float(data.get("brightness_pct", data.get("auto_dim_pct", DEFAULT_BRIGHTNESS_PCT))),
     )
 
 
 def tracks_to(settings: TrackSettings) -> dict[str, Any]:
     return {
+        "on": settings.on,
+        "weather": settings.weather,
         "sensor": settings.sensor,
         "fallback": settings.fallback,
-        "dim_below": settings.dim_below,
-        "normal_above": settings.normal_above,
-        "auto_dim_pct": settings.auto_dim_pct,
+        "first": settings.first,
+        "periods": list(settings.periods) if settings.periods is not None else None,
+        "dark_below_pct": settings.dark_below,
+        "normal_above_pct": settings.normal_above,
+        "brightness_pct": settings.brightness_pct,
     }

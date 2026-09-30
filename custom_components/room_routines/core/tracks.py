@@ -1,65 +1,111 @@
-"""Normal and Dim days.
+"""Normal days and Dark Days.
 
-Every room can have a second set of looks, the *Dim* track, for dark days:
-winter afternoons, heavy overcast. One light sensor for the whole house (ideally
-outdoors, or one indoors that sees the sky) picks the track.
+Every room can have a second set of looks for Dark Days: heavy overcast, a
+winter morning before sunrise. Whether today is a Dark Day is judged against a
+*clear* day at the same height of the sun, not against a fixed light level, so
+an evening isn't "dark" just because the sun is getting low, and a bright but
+cloudy day isn't dark just because it's cloudy.
 
-The light level is a 15-minute average, weighted by time: a sensor that only
-reports when the light changes (as Hue sensors do) keeps its last value until
-it sends a new one, so a burst of readings while clouds pass doesn't outweigh
-a long steady stretch. The track changes only when the average crosses one of
-two thresholds (Dim below ``dim_below``, back to Normal above ``normal_above``)
-and only once the current track has held for ``min_hold``, so passing clouds
-don't flip it back and forth.
+Two sources measure "how much of a clear day's light is there right now":
 
-Auto-dim: on a Dim day, a period without a Dim look can use its Normal look
-with every set brightness at ``auto_dim_pct`` percent (50: a light at 66 % comes
-on at 33 %). 100 turns it off. Explicit Dim looks always win.
+* **the weather**: the sunlight reaching the ground at Home Assistant's
+  location (Open-Meteo), divided by what a cloudless sky would give at this
+  sun height (see ``sun.clear_sky``);
+* **a light sensor** (optional, with a backup sensor): its 15-minute average,
+  divided by what it reads on a clear day at this sun height, learned from its
+  own history (see ``daylight.DaylightReference``).
 
-A sensor that is unavailable, or hasn't reported yet, changes nothing: the
-current track stays. (A room that falls to Dim every time a battery dies would
-be worse than one that stays Normal a little too long.)
+One is checked first (the weather, unless the setting says otherwise), the
+other when the first has nothing to say.
+
+Rules, in order:
+
+1. Dark Days only happen in the periods chosen for them (by default the ones
+   that start between 06:00 and 15:00). Any other period is a Normal day.
+2. With the sun down (below ``MIN_ELEVATION``) it's a Dark Day.
+3. Below ``dark_below`` percent of a clear day it becomes a Dark Day; above
+   ``normal_above`` it becomes Normal again; in between it stays as it is.
+   The day holds for at least ``min_hold`` before changing again, so passing
+   clouds don't flip it back and forth. At start-up and at each period start it
+   is picked straight away.
+
+No reading at all changes nothing: the current day stays.
+
+On a Dark Day, a period without its own Dark Day look uses its Normal look with
+every set brightness at ``brightness_pct`` percent (below 100 dims, above 100
+brightens, but no light goes past its own maximum).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
+
+from .daylight import MIN_ELEVATION, DaylightReference
+from .sun import SunPosition
 
 NORMAL = "normal"
-DIM = "dim"
+DIM = "dim"  # stored id of the Dark Day track
 TRACKS = (NORMAL, DIM)
-TRACK_LABELS = {NORMAL: "Normal", DIM: "Dim"}
+TRACK_LABELS = {NORMAL: "Normal day", DIM: "Dark Day"}
 
-DEFAULT_DIM_BELOW = 800.0
-DEFAULT_NORMAL_ABOVE = 1500.0
-DEFAULT_AUTO_DIM_PCT = 100.0
+WEATHER = "weather"
+SENSOR = "sensor"
+SOURCES = (WEATHER, SENSOR)
+
+DEFAULT_DARK_BELOW = 40.0
+DEFAULT_NORMAL_ABOVE = 55.0
+DEFAULT_BRIGHTNESS_PCT = 100.0
+MAX_BRIGHTNESS_PCT = 300.0
+DEFAULT_FIRST_START = time(6, 0)
+DEFAULT_LAST_START = time(15, 0)
+WEATHER_STALE = timedelta(minutes=45)
+
+
+def default_periods(starts: dict[str, time]) -> tuple[str, ...]:
+    """The periods Dark Days apply to when none are chosen: the daytime ones."""
+    return tuple(n for n, t in starts.items() if DEFAULT_FIRST_START <= t <= DEFAULT_LAST_START)
 
 
 @dataclass(frozen=True)
 class TrackSettings:
+    on: bool = False
+    weather: bool = True
     sensor: str | None = None
     fallback: str | None = None
-    dim_below: float = DEFAULT_DIM_BELOW
+    first: str = WEATHER
+    periods: tuple[str, ...] | None = None  # None: the default daytime periods
+    dark_below: float = DEFAULT_DARK_BELOW  # percent of a clear day
     normal_above: float = DEFAULT_NORMAL_ABOVE
-    auto_dim_pct: float = DEFAULT_AUTO_DIM_PCT
+    brightness_pct: float = DEFAULT_BRIGHTNESS_PCT
     window: timedelta = timedelta(minutes=15)
     min_hold: timedelta = timedelta(minutes=20)
 
     def __post_init__(self) -> None:
-        if not self.dim_below < self.normal_above:
-            raise ValueError("dim_below must be lower than normal_above")
-        if not 1 <= self.auto_dim_pct <= 100:
-            raise ValueError("auto_dim_pct must be between 1 and 100")
+        if self.first not in SOURCES:
+            raise ValueError(f"unknown source {self.first!r}")
+        if not 0 <= self.dark_below < self.normal_above <= 200:
+            raise ValueError("dark_below must be lower than normal_above")
+        if not 1 <= self.brightness_pct <= MAX_BRIGHTNESS_PCT:
+            raise ValueError(f"brightness_pct must be between 1 and {MAX_BRIGHTNESS_PCT:g}")
 
     @property
-    def auto_dim(self) -> float:
-        """Auto-dim as a factor (1.0 = off)."""
-        return self.auto_dim_pct / 100
+    def factor(self) -> float:
+        """Dark Day brightness for Normal looks, as a factor (1.0 = unchanged)."""
+        return self.brightness_pct / 100
+
+    @property
+    def has_sensor(self) -> bool:
+        return bool(self.sensor or self.fallback)
 
     @property
     def enabled(self) -> bool:
-        return bool(self.sensor or self.fallback)
+        return self.on and (self.weather or self.has_sensor)
+
+    def order(self) -> tuple[str, ...]:
+        """The sources in use, the one checked first first."""
+        use = [s for s in SOURCES if (s == WEATHER and self.weather) or (s == SENSOR and self.has_sensor)]
+        return tuple(sorted(use, key=lambda s: s != self.first))
 
 
 @dataclass
@@ -100,23 +146,39 @@ class LightLevel:
         return total / span
 
 
+@dataclass(frozen=True)
+class Reading:
+    """How much of a clear day's light there is, and where that came from."""
+
+    pct: float | None  # percent of a clear day; None = no reading
+    source: str | None = None  # WEATHER or SENSOR
+    lux: float | None = None  # the sensor's average, for a sensor reading
+    sensor: str | None = None
+
+
 @dataclass
 class TrackChooser:
     settings: TrackSettings
     track: str = NORMAL
     since: datetime | None = None
     by_hand: bool = False
+    reason: str = ""
     main: LightLevel = field(default_factory=LightLevel)
     backup: LightLevel = field(default_factory=LightLevel)
     main_ok: bool = False
     backup_ok: bool = False
+    weather_pct: float | None = None
+    weather_at: datetime | None = None
+    references: dict[str, DaylightReference] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.main.window = self.settings.window
         self.backup.window = self.settings.window
 
+    # -- inputs --
+
     def reading(self, sensor: str, value: float | None, at: datetime) -> None:
-        """A sensor's new value. ``None`` = unavailable."""
+        """A light sensor's new value. ``None`` = unavailable."""
         if sensor == self.settings.sensor:
             self.main_ok = value is not None
             if value is not None:
@@ -126,7 +188,25 @@ class TrackChooser:
             if value is not None:
                 self.backup.add(value, at)
 
-    def level(self, now: datetime) -> tuple[float | None, str | None]:
+    def weather(self, pct: float | None, at: datetime) -> None:
+        """The weather's percent of a clear day (``None``: no answer, e.g. the sun
+        too low to tell)."""
+        self.weather_pct = pct
+        self.weather_at = at
+
+    # -- readings --
+
+    def weather_reading(self, now: datetime) -> Reading:
+        if (
+            not self.settings.weather
+            or self.weather_pct is None
+            or self.weather_at is None
+            or now - self.weather_at > WEATHER_STALE
+        ):
+            return Reading(None)
+        return Reading(self.weather_pct, WEATHER)
+
+    def sensor_level(self, now: datetime) -> tuple[float | None, str | None]:
         """The averaged light level and the sensor it came from."""
         if self.main_ok and (avg := self.main.average(now)) is not None:
             return avg, self.settings.sensor
@@ -134,31 +214,71 @@ class TrackChooser:
             return avg, self.settings.fallback
         return None, None
 
-    def update(self, now: datetime, first: bool = False) -> bool:
-        """Re-check the track. Returns whether it changed.
+    def sensor_reading(self, now: datetime, sun: SunPosition) -> Reading:
+        lux, sensor = self.sensor_level(now)
+        if lux is None or sensor is None:
+            return Reading(None)
+        reference = self.references.get(sensor)
+        clear = reference.lookup(sun.elevation, sun.morning) if reference else None
+        if not clear:
+            return Reading(None, None, lux, sensor)  # still learning this sun height
+        return Reading(round(100 * lux / clear, 1), SENSOR, lux, sensor)
 
-        ``first`` (at start-up) picks the track straight from the light level,
-        without waiting for the minimum hold.
+    def current(self, now: datetime, sun: SunPosition) -> Reading:
+        """The reading from the first source that has one."""
+        fallback = Reading(None)
+        for source in self.settings.order():
+            got = self.weather_reading(now) if source == WEATHER else self.sensor_reading(now, sun)
+            if got.pct is not None:
+                return got
+            if got.lux is not None and fallback.lux is None:
+                fallback = got
+        return fallback
+
+    # -- deciding --
+
+    def _wanted(self, now: datetime, sun: SunPosition, active: bool, first: bool) -> str | None:
+        if not active:
+            self.reason = "not a Dark Day period"
+            return NORMAL
+        if sun.elevation < MIN_ELEVATION:
+            self.reason = "the sun is down"
+            return DIM
+        got = self.current(now, sun)
+        if got.pct is None:
+            self.reason = "no light reading"
+            return None
+        where = "the weather" if got.source == WEATHER else "the light sensor"
+        self.reason = f"{round(got.pct)} % of a clear day, from {where}"
+        if got.pct < self.settings.dark_below:
+            return DIM
+        if got.pct > self.settings.normal_above:
+            return NORMAL
+        if first or self.since is None:
+            return DIM if got.pct < (self.settings.dark_below + self.settings.normal_above) / 2 else NORMAL
+        return None  # in between: stays
+
+    def update(self, now: datetime, sun: SunPosition, active: bool, first: bool = False) -> bool:
+        """Re-check the day. Returns whether it changed.
+
+        ``first`` (at start-up and each period start) picks straight away,
+        without waiting for the minimum hold. Leaving the chosen periods is
+        always immediate.
         """
+        if not self.settings.enabled:
+            self.reason = "Dark Days are off"
+            changed = self.track != NORMAL
+            self.track, self.since, self.by_hand = NORMAL, None, False
+            return changed
         if self.by_hand:
             return False
-        level, _ = self.level(now)
-        if level is None:
+        new = self._wanted(now, sun, active, first)
+        if new is None or new == self.track:
+            if new is not None and self.since is None:
+                self.since = now
             return False
-        if first or self.since is None:
-            # Never decided from a real level yet: pick straight away.
-            self.since = now
-            new = DIM if level < self.settings.dim_below else NORMAL
-            changed = new != self.track
-            self.track = new
-            return changed
-        if now - self.since < self.settings.min_hold:
-            return False
-        if self.track == NORMAL and level < self.settings.dim_below:
-            new = DIM
-        elif self.track == DIM and level > self.settings.normal_above:
-            new = NORMAL
-        else:
+        immediate = first or self.since is None or not active
+        if not immediate and now - self.since < self.settings.min_hold:
             return False
         self.track = new
         self.since = now
@@ -169,14 +289,12 @@ class TrackChooser:
         if track not in TRACKS:
             raise ValueError(f"unknown track {track!r}")
         self.by_hand = True
+        self.reason = "chosen by hand"
         changed = track != self.track
         self.track = track
         self.since = now
         return changed
 
-    def release(self, now: datetime) -> bool:
-        """Back to following the light level. Returns whether the track changed."""
-        if not self.by_hand:
-            return False
+    def release(self) -> None:
+        """Back to following the light (the caller then re-checks with ``first``)."""
         self.by_hand = False
-        return self.update(now, first=True)

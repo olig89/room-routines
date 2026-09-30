@@ -123,11 +123,34 @@ def test_removing_a_light_drops_it_from_dim_looks_too():
 
 
 def test_dark_day_settings():
-    options = set_tracks(base(), {"sensor": "sensor.window", "dim_below": 600, "normal_above": 1200})
+    options = set_tracks(base(), {"on": True, "sensor": "sensor.window", "dark_below_pct": 30, "normal_above_pct": 50})
     assert options["tracks"] == {
-        "sensor": "sensor.window", "fallback": None, "dim_below": 600.0, "normal_above": 1200.0, "auto_dim_pct": 100.0,
+        "on": True, "weather": True, "sensor": "sensor.window", "fallback": None, "first": "weather",
+        "periods": None, "dark_below_pct": 30.0, "normal_above_pct": 50.0, "brightness_pct": 100.0,
     }
-    assert set_tracks(base(), {"sensor": "sensor.window", "auto_dim_pct": 50})["tracks"]["auto_dim_pct"] == 50.0
+    assert set_tracks(base(), {"brightness_pct": 150})["tracks"]["brightness_pct"] == 150.0
     assert "stray" not in options
     with pytest.raises(SettingsError):
-        set_tracks(base(), {"sensor": "sensor.window", "dim_below": 900, "normal_above": 900})
+        set_tracks(base(), {"dark_below_pct": 50, "normal_above_pct": 50})
+    with pytest.raises(SettingsError):
+        set_tracks(base(), {"first": "moon"})
+
+
+def test_dark_day_periods_keep_only_known_ones_and_follow_renames():
+    options = set_tracks(base(), {"on": True, "periods": ["Morning", "Day", "Nope"]})
+    assert options["tracks"]["periods"] == ["Morning", "Day"]
+    rows = [{"name": n, "start": t} for n, t in (
+        ("Overnight", "23:00"), ("Early morning", "05:30"), ("Breakfast", "07:00"), ("Evening", "17:00"),
+    )]
+    options = set_periods(options, rows, [], {"Morning": "Breakfast", "Day": None})
+    assert options["tracks"]["periods"] == ["Breakfast"]
+
+
+def test_old_lux_settings_carry_over():
+    from custom_components.room_routines.core.serial import tracks_from
+
+    old = {"tracks": {"sensor": "sensor.window", "fallback": None, "dim_below": 800, "normal_above": 1500, "auto_dim_pct": 60}}
+    t = tracks_from(old)
+    assert t.on and t.weather and t.sensor == "sensor.window"
+    assert (t.dark_below, t.normal_above, t.brightness_pct) == (40, 55, 60)
+    assert not tracks_from({}).on

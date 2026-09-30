@@ -7,14 +7,14 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.3.1";
+const PANEL_VERSION = "0.4.0";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
-const TRACK_LABEL = { normal: "Normal", dim: "Dim" };
+const TRACK_LABEL = { normal: "Normal day", dim: "Dark Day" };
 const TRACK_ICON = { normal: "mdi:weather-sunny", dim: "mdi:weather-cloudy" };
 const HUE_SCENE_NOTE =
-  "This scene comes from another app (such as the Hue app), so Room Routines can turn it on but can't read it: it can't be auto-dimmed on Dim days, lights that can't fade by themselves jump to it instead of moving gradually, and suggestions can't compare with it. A scene saved with Save as now, or made in Home Assistant's scene editor, has none of these limits.";
+  "This scene comes from another app (such as the Hue app), so Room Routines can turn it on but can't read it: it can't be made dimmer or brighter on Dark Days, lights that can't fade by themselves jump to it instead of moving gradually, and suggestions can't compare with it. A scene saved with Save as now, or made in Home Assistant's scene editor, has none of these limits.";
 const MODE_HELP = {
   off: "Does nothing.",
   log_only: "Works out what it would do and writes it down, but switches nothing. Use it to check a room before it goes live.",
@@ -34,7 +34,7 @@ const ERRORS = {
   unauthorized: "Only an administrator can change this.",
   unknown_scene: "Home Assistant didn't create the scene in time. Try again in a moment.",
   unknown_track: "That track doesn't exist.",
-  invalid_tracks: "Normal must start at a higher light level than Dim.",
+  invalid_tracks: "Normal again must be above the Dark Day level, and the brightness between 1 and 300 %.",
 };
 
 const esc = (s) =>
@@ -80,7 +80,7 @@ class RoomRoutinesPanel extends HTMLElement {
     this._editLook = null; // {room, period, draft}
     this._roomDraft = null; // settings: room being added or changed
     this._periodDraft = null; // settings: period list being changed
-    this._tracksDraft = null; // settings: the dark-day sensor being changed
+    this._tracksDraft = null; // settings: the Dark Day settings being changed
     this._track = loadPref("look-track", "normal"); // which track's looks the room page shows
     this._scenePick = null; // {room, period, track}: choosing a scene for a look
     this._history = {}; // room id -> {hours, data | loading | error}
@@ -284,9 +284,36 @@ class RoomRoutinesPanel extends HTMLElement {
 
   _trackTitle(house) {
     const t = house.tracks;
-    const level = t.level == null ? "light level unknown" : `${t.level} lx`;
     const by = house.track_by_hand ? " Chosen by hand until the next period." : "";
-    return `${TRACK_LABEL[house.track]} day: ${level}. Dim below ${t.dim_below} lx, Normal again above ${t.normal_above} lx.${by}`;
+    return `${TRACK_LABEL[house.track]}: ${t.reason || "not checked yet"}.${by}`;
+  }
+
+  // Dark Days in a few lines: today, where the reading comes from, the rules.
+  _darkDaySummary(house) {
+    const t = house.tracks;
+    const list = (xs) => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
+    const sensor = t.sensor || t.fallback;
+    const sensorText = sensor
+      ? `the light sensor <b>${esc(this._name(sensor))}</b>${t.sensor && t.fallback ? ` (or <b>${esc(this._name(t.fallback))}</b> when it's unavailable)` : ""}`
+      : "";
+    const sources = [];
+    if (t.weather) sources.push("<b>the weather</b> (Open-Meteo)");
+    if (sensorText) sources.push(sensorText);
+    if (t.first === "sensor") sources.reverse();
+    const from = sources.length > 1 ? `Checks ${sources[0]} first, then ${sources[1]}.` : `Uses ${sources[0] || "nothing yet"}.`;
+    const learned = sensor ? t.learned?.[t.level_sensor || sensor] ?? 0 : 0;
+    const now = [];
+    if (t.weather) now.push(`the weather ${t.weather_pct == null ? "no answer" : `${esc(t.weather_pct)} % of a clear day${t.cloud_cover != null ? `, ${esc(t.cloud_cover)} % cloud` : ""}`}`);
+    if (sensor) {
+      now.push(t.level == null ? "the light sensor no reading"
+        : `the light sensor ${esc(t.level)} lx${t.sensor_pct == null ? ` (still learning what a clear day looks like at this sun height; ${learned} learned so far)` : `, ${esc(t.sensor_pct)} % of a clear day`}`);
+    }
+    const pct = t.brightness_pct ?? 100;
+    const periods = t.periods?.length ? list(t.periods.map(esc)) : "no periods";
+    return `<div><ha-icon icon="${TRACK_ICON[house.track]}"></ha-icon> Today is a <b>${esc(TRACK_LABEL[house.track])}</b>${t.reason ? `: ${esc(t.reason)}` : ""}.${house.track_by_hand ? " Chosen by hand until the next period." : ""}</div>
+      <div class="meta">Dark Days can happen in ${periods}: when the sun is down, or the light is below <b>${esc(t.dark_below_pct)} %</b> of a clear day at the same sun height (Normal again above <b>${esc(t.normal_above_pct)} %</b>). ${from}
+      Dark Day brightness for Normal looks: ${pct === 100 ? "unchanged" : `<b>${esc(pct)} %</b>`}.</div>
+      <div class="meta">Now: ${now.join("; ")}. The sun is at ${esc(t.sun_elevation)}°.</div>`;
   }
 
   _stealthBanner() {
@@ -383,7 +410,7 @@ class RoomRoutinesPanel extends HTMLElement {
       <div class="meta">${this._luxLine(room)}</div>
       <div class="chips">${this._sensorDots(room)}</div>
       <div class="chips">${this._lightChips(room)}</div>
-      <div class="meta look"><b>${esc(d.house.period)}${room.look_track === "dim" ? " Dim" : ""} look${from}${room.look_factor && room.look_factor < 1 ? ` at ${Math.round(room.look_factor * 100)} %` : ""}:</b> ${this._lookText(room.current_look, room.settings.lights)}</div>
+      <div class="meta look"><b>${esc(d.house.period)} look${room.look_track === "dim" ? " for Dark Days" : ""}${from}${room.look_factor && room.look_factor !== 1 ? ` at ${Math.round(room.look_factor * 100)} %` : ""}:</b> ${this._lookText(room.current_look, room.settings.lights)}</div>
       ${room.suggestions?.length ? `<div class="meta hint"><ha-icon icon="mdi:lightbulb-on-outline"></ha-icon> ${room.suggestions.length === 1 ? "A suggestion" : `${room.suggestions.length} suggestions`} from how the lights get changed</div>` : ""}
     </div>`;
   }
@@ -409,12 +436,12 @@ class RoomRoutinesPanel extends HTMLElement {
         else if (own?.scene) cells = `<td colspan="${lights.length}">${this._sceneLink(own.scene)}</td>`;
         else if (own) cells = lights.map((l) => `<td>${this._target(own.lights?.[l])}</td>`).join("");
         else if (dim) {
-          const pct = d.house.tracks?.auto_dim_pct ?? 100;
+          const pct = d.house.tracks?.brightness_pct ?? 100;
           const from = room.looks[p] ? p : this._borrowedFrom(order, room.looks, p);
           const src = room.looks[p] ? "its Normal look" : `${esc(from || "—")}'s Normal look`;
           const srcLook = from ? room.looks[from] : null;
-          const note = pct < 100 && srcLook?.scene && !this._sceneReadable(srcLook.scene) ? ` <span class="warntext" title="${esc(HUE_SCENE_NOTE)}">(a scene from another app: not dimmed)</span>` : "";
-          cells = `<td colspan="${lights.length}" class="muted">${pct < 100 ? `Auto-dim: ${src} at ${esc(pct)} %${note}` : `Uses ${src}`}</td>`;
+          const note = pct !== 100 && srcLook?.scene && !this._sceneReadable(srcLook.scene) ? ` <span class="warntext" title="${esc(HUE_SCENE_NOTE)}">(a scene from another app: unchanged)</span>` : "";
+          cells = `<td colspan="${lights.length}" class="muted">${pct !== 100 ? `Uses ${src} at ${esc(pct)} %${note}` : `Uses ${src}`}</td>`;
         } else {
           const borrowed = this._borrowedFrom(order, room.looks, p);
           cells = lights.map((l) => `<td class="muted">${borrowed ? `as ${esc(borrowed)}` : "—"}</td>`).join("");
@@ -427,10 +454,10 @@ class RoomRoutinesPanel extends HTMLElement {
       })
       .join("");
     const trackTabs = `<div class="subtabs">
-      ${Object.entries(TRACK_LABEL).map(([k, v]) => `<button class="subtab ${k === track ? "on" : ""}" data-action="look-track" data-track="${k}"><ha-icon icon="${TRACK_ICON[k]}"></ha-icon> ${v} days</button>`).join("")}
+      ${Object.entries(TRACK_LABEL).map(([k, v]) => `<button class="subtab ${k === track ? "on" : ""}" data-action="look-track" data-track="${k}"><ha-icon icon="${TRACK_ICON[k]}"></ha-icon> ${v}s</button>`).join("")}
     </div>`;
     const trackHelp = dim
-      ? `<p class="explain">Dim looks are used on dark days${d.house.tracks?.enabled ? ` (the light sensor below ${esc(d.house.tracks.dim_below)} lx)` : ", once a light sensor is chosen under Settings → Dark days"}. ${(d.house.tracks?.auto_dim_pct ?? 100) < 100 ? `A period without a Dim look uses its Normal one turned down to ${esc(d.house.tracks.auto_dim_pct)} % (auto-dim; lights set to their last brightness stay as they are)` : "A period without a Dim look uses its Normal one"}, so only set the ones that should differ.</p>`
+      ? `<p class="explain">These looks are used on Dark Days${d.house.tracks?.enabled ? ` (in ${esc((d.house.tracks.periods || []).join(", ") || "no periods")}, when the sun is down or the light is below ${esc(d.house.tracks.dark_below_pct)} % of a clear day)` : ", once Dark Days are switched on under Settings → Dark Days"}. ${(d.house.tracks?.brightness_pct ?? 100) !== 100 ? `A period without its own Dark Day look uses its Normal one at ${esc(d.house.tracks.brightness_pct)} % brightness (lights set to their last brightness stay as they are)` : "A period without its own Dark Day look uses its Normal one"}, so only set the ones that should differ.</p>`
       : `<p class="explain">What the lights do when someone arrives, in each period. A period without its own look uses the one before it. Set the lights how you want them and press <b>Save as now</b>: it becomes a Home Assistant scene you can also use on wall buttons. Or pick a scene you already have, or edit a look by hand.</p>`;
     const s = room.settings;
     return `
@@ -491,7 +518,7 @@ class RoomRoutinesPanel extends HTMLElement {
       <button class="btn tiny" data-action="look-pick-scene" data-room="${r}" data-period="${p}" title="Use a scene you already have">Pick a scene</button>
       <button class="btn tiny" data-action="look-edit" data-room="${r}" data-period="${p}" title="Set each light by hand">Edit</button>
       <button class="btn tiny" data-action="look-nothing" data-room="${r}" data-period="${p}" title="Keep the room dark in this period">Keep dark</button>
-      ${own ? `<button class="btn tiny" data-action="look-borrow" data-room="${r}" data-period="${p}" title="${dim ? "Remove this Dim look: the period uses its Normal one" : "Remove this period's own look: it uses the previous period's"}">${dim ? "Use Normal" : "Use previous"}</button>` : ""}
+      ${own ? `<button class="btn tiny" data-action="look-borrow" data-room="${r}" data-period="${p}" title="${dim ? "Remove this Dark Day look: the period uses its Normal one" : "Remove this period's own look: it uses the previous period's"}">${dim ? "Use Normal" : "Use previous"}</button>` : ""}
     </div>`;
   }
 
@@ -505,7 +532,7 @@ class RoomRoutinesPanel extends HTMLElement {
       <label class="inline">Scene <select data-scene-choice>
         ${ordered.length ? ordered.map((e) => `<option value="${esc(e)}" ${own?.scene === e ? "selected" : ""}>${esc(this._name(e))}${inArea(e) ? " (in this area)" : ""}${this._sceneReadable(e) ? "" : " ⚠ from another app"}</option>`).join("") : `<option value="">No scenes yet</option>`}
       </select></label>
-      ${ordered.some((e) => !this._sceneReadable(e)) ? `<p class="explain"><ha-icon icon="mdi:alert-outline"></ha-icon> Scenes marked “from another app” (such as the Hue app's) can be turned on, but Room Routines can't read them: they can't be auto-dimmed on Dim days, lights that can't fade by themselves jump to them, and suggestions can't compare with them. Saving the lights with <b>Save as now</b> makes a Home Assistant scene without these limits.</p>` : ""}
+      ${ordered.some((e) => !this._sceneReadable(e)) ? `<p class="explain"><ha-icon icon="mdi:alert-outline"></ha-icon> Scenes marked “from another app” (such as the Hue app's) can be turned on, but Room Routines can't read them: they can't be made dimmer or brighter on Dark Days, lights that can't fade by themselves jump to them, and suggestions can't compare with them. Saving the lights with <b>Save as now</b> makes a Home Assistant scene without these limits.</p>` : ""}
       <div class="row">
         <button class="btn primary small" data-action="scene-pick-save" ${ordered.length ? "" : "disabled"}>Use it</button>
         <button class="btn small" data-action="scene-pick-cancel">Cancel</button>
@@ -693,7 +720,7 @@ class RoomRoutinesPanel extends HTMLElement {
     const altNames = d.house.alt_days.map((i) => WEEKDAYS[i]).join(", ");
     const t = d.house.tracks;
     const trackCard = t?.enabled
-      ? `<div class="card"><ha-icon icon="${TRACK_ICON[d.house.track]}"></ha-icon> Today is a <b>${esc(TRACK_LABEL[d.house.track])}</b> day. ${esc(this._trackTitle(d.house))}${t.level_sensor ? ` Measured by ${esc(this._name(t.level_sensor))}.` : ""}</div>`
+      ? `<div class="card">${this._darkDaySummary(d.house)}</div>`
       : "";
     return `
       ${trackCard}
@@ -734,11 +761,11 @@ class RoomRoutinesPanel extends HTMLElement {
         <div>${d.house.order.map((p) => `<span class="chip" style="--c:${this._periodColour(p)}">${esc(p)} ${esc(d.house.periods.find((x) => x.name === p).start)}</span>`).join(" ")}</div>
         <div class="row"><button class="btn small" data-action="edit-periods">Change the periods</button></div>
       </div>
-      <h2>Dark days</h2>
+      <h2>Dark Days</h2>
       <div class="card">
         ${d.house.tracks?.enabled
-          ? `<div>Light sensor: <b>${esc(this._name(d.house.tracks.sensor || d.house.tracks.fallback))}</b>${d.house.tracks.sensor && d.house.tracks.fallback ? `, or <b>${esc(this._name(d.house.tracks.fallback))}</b> when it's unavailable` : ""}. Dim below <b>${esc(d.house.tracks.dim_below)} lx</b>, Normal again above <b>${esc(d.house.tracks.normal_above)} lx</b>. Now: ${d.house.tracks.level == null ? "unknown" : `${esc(d.house.tracks.level)} lx`}, a ${esc(TRACK_LABEL[d.house.track])} day. Auto-dim: ${d.house.tracks.auto_dim_pct < 100 ? `<b>${esc(d.house.tracks.auto_dim_pct)} %</b>` : "off"}.</div>`
-          : `<div class="meta">Off: every room uses its Normal looks. Choose a light sensor that sees the daylight to use Dim looks on dark days.</div>`}
+          ? this._darkDaySummary(d.house)
+          : `<div class="meta">Off: every day is a Normal day and rooms use their Normal looks. Switch Dark Days on to use Dark Day looks (or dimmer or brighter Normal ones) on grey days.</div>`}
         <div class="row"><button class="btn small" data-action="edit-tracks">Change</button></div>
       </div>
       <p class="explain">Settings are only shown to administrators. Everyone who can open this page can see the rooms and change their looks.</p>`;
@@ -826,12 +853,23 @@ class RoomRoutinesPanel extends HTMLElement {
 
   _startTracksDraft(d) {
     const t = d.house.tracks || {};
-    this._tracksDraft = { sensor: t.sensor || null, fallback: t.fallback || null, dim_below: t.dim_below ?? 800, normal_above: t.normal_above ?? 1500, auto_dim_pct: t.auto_dim_pct ?? 100 };
+    this._tracksDraft = {
+      on: !!t.on,
+      weather: t.weather !== false,
+      sensor: t.sensor || null,
+      fallback: t.fallback || null,
+      first: t.first || "weather",
+      periods: [...(t.periods || [])],
+      dark_below_pct: t.dark_below_pct ?? 40,
+      normal_above_pct: t.normal_above_pct ?? 55,
+      brightness_pct: t.brightness_pct ?? 100,
+    };
     this._tracksError = null;
   }
 
   _tracksForm() {
     const t = this._tracksDraft;
+    const order = this._data?.house?.order || [];
     const sensors = Object.keys(this._hass.states)
       .filter((e) => e.startsWith("sensor."))
       .sort((a, b) => {
@@ -841,21 +879,41 @@ class RoomRoutinesPanel extends HTMLElement {
       });
     const pick = (key, none) => `<select data-tracks-field="${key}"><option value="">${none}</option>
       ${sensors.map((e) => `<option value="${esc(e)}" ${e === t[key] ? "selected" : ""}>${esc(this._name(e))}</option>`).join("")}</select>`;
+    const pct = Number(t.brightness_pct ?? 100);
+    const brighten = pct > 100
+      ? `<div class="warntext"><ha-icon icon="mdi:alert-outline"></ha-icon> Brightening only works on lights set below their maximum: a light at 60 % at ${esc(pct)} % comes on at ${Math.min(100, Math.round(60 * pct / 100))} %, but one already at 100 % can't go any higher.</div>`
+      : "";
     return `
       <div class="detailhead"><button class="btn small" data-action="tracks-cancel"><ha-icon icon="mdi:arrow-left"></ha-icon> Back</button></div>
       <div class="card form">
-        <h2 class="inline">Dark days</h2>
-        <p class="explain">One light sensor for the whole house decides whether today is a Normal or a Dim day, and rooms use their Dim looks on Dim days. Best is a sensor that sees the sky: outdoors, or indoors facing out of a window. Its level is averaged over 15 minutes, and a day stays Normal or Dim for at least 20 minutes, so passing clouds don't flip it.</p>
+        <h2 class="inline">Dark Days</h2>
+        <p class="explain">On a Dark Day rooms use their Dark Day looks: grey, overcast days, or mornings before sunrise. A day counts as dark by comparing the light now with a clear day at the same height of the sun, so an ordinary evening or a bright cloudy day isn't dark. The reading is averaged over 15 minutes, and a day stays Normal or Dark for at least 20 minutes, so passing clouds don't flip it.</p>
         ${this._tracksError ? `<div class="warntext">${esc(this._tracksError)}</div>` : ""}
-        <label>Light sensor ${pick("sensor", "None (dark days off)")}</label>
-        <label>If it's unavailable, use ${pick("fallback", "Nothing: keep the current day")}</label>
+        <label class="inline"><input type="checkbox" data-tracks-check="on" ${t.on ? "checked" : ""}> Use Dark Days</label>
+        <h3>Where the light reading comes from</h3>
+        <label class="inline"><input type="checkbox" data-tracks-check="weather" ${t.weather ? "checked" : ""}> The weather</label>
+        <span class="help">The sunlight reaching the ground at Home Assistant's location, from Open-Meteo (free, no account; asked four times an hour). Enough on its own.</span>
+        <label>Light sensor (optional) ${pick("sensor", "None")}
+          <span class="help">One that sees the sky: outdoors, or indoors facing out of a window. It learns what a clear day looks like to it from its own history, so it needs a few days (and at least one bright one) before it can answer.</span></label>
+        <label>If it's unavailable, use ${pick("fallback", "Nothing")}</label>
+        <label>Check first <select data-tracks-field="first">
+          <option value="weather" ${t.first !== "sensor" ? "selected" : ""}>The weather</option>
+          <option value="sensor" ${t.first === "sensor" ? "selected" : ""}>The light sensor</option>
+        </select>
+          <span class="help">The other is used when the first has no answer (the weather service can't be reached, or the sensor is unavailable or still learning).</span></label>
+        <h3>When</h3>
+        <div>${order.map((p) => `<label class="inline"><input type="checkbox" data-tracks-period="${esc(p)}" ${t.periods.includes(p) ? "checked" : ""}> ${esc(p)}</label>`).join("")}</div>
+        <span class="help">Dark Days only happen in these periods; any other period is always a Normal day. Choose the daytime ones: the sun being down counts as dark.</span>
         <div class="twocol">
-          <label>Dim below <span class="inputunit"><input type="number" min="0" step="10" value="${esc(t.dim_below)}" data-tracks-field="dim_below"> lx</span></label>
-          <label>Normal again above <span class="inputunit"><input type="number" min="0" step="10" value="${esc(t.normal_above)}" data-tracks-field="normal_above"> lx</span>
-            <span class="help">Higher than Dim, so the day doesn't flip back and forth around one level.</span></label>
-          <label>Auto-dim: periods without a Dim look use their Normal look at <span class="inputunit"><input type="number" min="1" max="100" step="5" value="${esc(t.auto_dim_pct)}" data-tracks-field="auto_dim_pct"> %</span>
-            <span class="help">100 turns it off. A light at 66 % with auto-dim at 50 % comes on at 33 %. Colours stay; lights set to their last brightness, and scenes from other apps (such as the Hue app), can't be dimmed.</span></label>
+          <label>Dark Day below <span class="inputunit"><input type="number" min="0" max="199" step="5" value="${esc(t.dark_below_pct)}" data-tracks-field="dark_below_pct"> %</span>
+            <span class="help">Of a clear day's light at the same sun height.</span></label>
+          <label>Normal again above <span class="inputunit"><input type="number" min="1" max="200" step="5" value="${esc(t.normal_above_pct)}" data-tracks-field="normal_above_pct"> %</span>
+            <span class="help">Higher than the Dark Day level, so the day doesn't flip back and forth around one level.</span></label>
         </div>
+        <h3>Normal looks on Dark Days</h3>
+        <label>Brightness <span class="inputunit"><input type="number" min="1" max="300" step="5" value="${esc(t.brightness_pct)}" data-tracks-field="brightness_pct"> %</span>
+          <span class="help">For periods without their own Dark Day look: their Normal look at this brightness. 100 leaves it as it is; below 100 dims (a light at 66 % at 50 % comes on at 33 %); above 100 brightens, up to each light's maximum. Colours stay; lights set to their last brightness, and scenes from other apps (such as the Hue app), are left as they are.</span></label>
+        ${brighten}
         <div class="row">
           <button class="btn primary" data-action="tracks-save">Save</button>
           <button class="btn" data-action="tracks-cancel">Cancel</button>
@@ -1019,6 +1077,21 @@ class RoomRoutinesPanel extends HTMLElement {
       el.addEventListener("change", () => {
         const f = el.dataset.tracksField;
         this._tracksDraft[f] = el.type === "number" ? (el.value === "" ? null : Number(el.value)) : el.value || null;
+        if (f === "brightness_pct") this._render(); // the warning follows the number
+      })
+    );
+    root.querySelectorAll("[data-tracks-check]").forEach((el) =>
+      el.addEventListener("change", () => {
+        this._tracksDraft[el.dataset.tracksCheck] = el.checked;
+      })
+    );
+    root.querySelectorAll("[data-tracks-period]").forEach((el) =>
+      el.addEventListener("change", () => {
+        const p = el.dataset.tracksPeriod;
+        const set = new Set(this._tracksDraft.periods);
+        if (el.checked) set.add(p);
+        else set.delete(p);
+        this._tracksDraft.periods = (this._data?.house?.order || []).filter((x) => set.has(x));
       })
     );
 
@@ -1119,7 +1192,7 @@ class RoomRoutinesPanel extends HTMLElement {
       case "look-scene-now": {
         const period = el.dataset.period;
         const ok = await this._saveScene(room, period, this._track, null);
-        if (ok) this._notice = { text: `Saved the lights as the ${period}${this._track === "dim" ? " Dim" : ""} look, as the scene "${ok}".` };
+        if (ok) this._notice = { text: `Saved the lights as the ${period} look${this._track === "dim" ? " for Dark Days" : ""}, as the scene "${ok}".` };
         this._render();
         return;
       }
@@ -1137,7 +1210,7 @@ class RoomRoutinesPanel extends HTMLElement {
         if (!scene) return;
         const res = await this._ws(
           { type: "room_routines/save_look", room_id: pick.room, period: pick.period, track: pick.track, how: "scene", scene },
-          `${pick.period}${pick.track === "dim" ? " Dim" : ""} now turns on ${this._name(scene)}.`
+          `${pick.period}${pick.track === "dim" ? " on Dark Days" : ""} now turns on ${this._name(scene)}.`
         );
         if (res.ok) this._scenePick = null;
         else this._notice = { text: res.error, bad: true };
@@ -1182,8 +1255,19 @@ class RoomRoutinesPanel extends HTMLElement {
       case "tracks-save": {
         const t = this._tracksDraft;
         const res = await this._ws(
-          { type: "room_routines/save_tracks", sensor: t.sensor, fallback: t.fallback, dim_below: t.dim_below ?? 800, normal_above: t.normal_above ?? 1500, auto_dim_pct: t.auto_dim_pct ?? 100 },
-          t.sensor || t.fallback ? "Saved the dark-day settings." : "Dark days are off."
+          {
+            type: "room_routines/save_tracks",
+            on: !!t.on,
+            weather: !!t.weather,
+            sensor: t.sensor,
+            fallback: t.fallback,
+            first: t.first || "weather",
+            periods: t.periods,
+            dark_below_pct: t.dark_below_pct ?? 40,
+            normal_above_pct: t.normal_above_pct ?? 55,
+            brightness_pct: t.brightness_pct ?? 100,
+          },
+          t.on ? "Saved the Dark Day settings." : "Dark Days are off."
         );
         if (!res.ok) {
           this._tracksError = res.error;
@@ -1215,7 +1299,7 @@ class RoomRoutinesPanel extends HTMLElement {
         const e = this._editLook;
         const res = await this._ws(
           { type: "room_routines/save_look", room_id: e.room, period: e.period, track: e.track, how: "custom", look: this._lookFromDraft(e.draft) },
-          `Saved the ${e.period}${e.track === "dim" ? " Dim" : ""} look.`
+          `Saved the ${e.period} look${e.track === "dim" ? " for Dark Days" : ""}.`
         );
         if (res.ok) this._editLook = null;
         else this._notice = { text: res.error, bad: true };
@@ -1229,9 +1313,9 @@ class RoomRoutinesPanel extends HTMLElement {
         const period = el.dataset.period;
         const dim = this._track === "dim";
         const text = {
-          current: `Saved the lights as they are now as the ${period}${dim ? " Dim" : ""} look.`,
-          nothing: `${room.name} stays dark in ${period}${dim ? " on Dim days" : ""}.`,
-          borrow: dim ? `${period} now uses its Normal look on Dim days.` : `${period} now uses the previous period's look.`,
+          current: `Saved the lights as they are now as the ${period} look${dim ? " for Dark Days" : ""}.`,
+          nothing: `${room.name} stays dark in ${period}${dim ? " on Dark Days" : ""}.`,
+          borrow: dim ? `${period} now uses its Normal look on Dark Days.` : `${period} now uses the previous period's look.`,
         }[how];
         const res = await this._ws({ type: "room_routines/save_look", room_id: room.id, period, track: this._track, how }, text);
         if (!res.ok) this._notice = { text: res.error, bad: true };
@@ -1370,6 +1454,7 @@ const STYLES = `
   .content { padding:16px; max-width:1200px; margin:0 auto; }
   h2 { font-size:16px; font-weight:500; margin:20px 0 8px; }
   h2.inline { margin-top:0; }
+  h3 { font-size:14px; font-weight:500; margin:16px 0 4px; }
   .card { background: var(--card-background-color); border-radius: var(--ha-card-border-radius, 12px); box-shadow: var(--ha-card-box-shadow, none); border:1px solid var(--divider-color); padding:16px; margin-bottom:12px; }
   .card.warn { border-color: var(--error-color, #db4437); }
   .card.notice { border-color: var(--primary-color); }

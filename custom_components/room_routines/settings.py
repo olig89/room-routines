@@ -147,6 +147,11 @@ def set_periods(
                 if target and target in names:
                     looks[target] = look
             room[key] = looks
+    tracks = out.get(CONF_TRACKS)
+    if tracks and tracks.get("periods") is not None:
+        # The Dark Day periods follow renames too (a removed one drops out).
+        moved = [renames.get(p, p) for p in tracks["periods"]]
+        out[CONF_TRACKS] = {**tracks, "periods": [p for p in moved if p and p in names]}
     out[CONF_PERIODS] = clean_rows
     out[CONF_ALT_DAYS] = days
     return out
@@ -163,7 +168,7 @@ def set_look(
     track: str = NORMAL,
 ) -> dict[str, Any]:
     """A room's look for one period on one track. ``None`` removes it: on Normal
-    the period then borrows the previous period's; on Dim it uses its Normal look."""
+    the period then borrows the previous period's; on a Dark Day it uses its Normal look."""
     out = _options(options)
     room = _room(out, room_id)
     if period not in {p.name for p in schedule_from(out).periods}:
@@ -188,15 +193,23 @@ def set_look(
 
 
 def set_tracks(options: Mapping[str, Any], data: Mapping[str, Any]) -> dict[str, Any]:
-    """The light sensor (and backup) that picks Normal or Dim days, and its thresholds.
-    No sensor at all turns dark days off: every room stays Normal."""
+    """Dark Days: on or off, where the light reading comes from, the periods
+    they apply to, the thresholds and the Dark Day brightness."""
     out = _options(options)
+    periods = data.get("periods")
+    if periods is not None:
+        known = set(schedule_from(out).order())
+        periods = [p for p in periods if p in known]
     row = {
+        "on": bool(data.get("on", False)),
+        "weather": bool(data.get("weather", True)),
         "sensor": data.get("sensor") or None,
         "fallback": data.get("fallback") or None,
-        "dim_below": data.get("dim_below", 800),
-        "normal_above": data.get("normal_above", 1500),
-        "auto_dim_pct": data.get("auto_dim_pct", 100),
+        "first": data.get("first", "weather"),
+        "periods": periods,
+        "dark_below_pct": data.get("dark_below_pct", 40),
+        "normal_above_pct": data.get("normal_above_pct", 55),
+        "brightness_pct": data.get("brightness_pct", 100),
     }
     try:
         settings = tracks_from({CONF_TRACKS: row})
