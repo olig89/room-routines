@@ -7,7 +7,7 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.4.0";
+const PANEL_VERSION = "0.4.1";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
@@ -303,17 +303,47 @@ class RoomRoutinesPanel extends HTMLElement {
     const from = sources.length > 1 ? `Checks ${sources[0]} first, then ${sources[1]}.` : `Uses ${sources[0] || "nothing yet"}.`;
     const learned = sensor ? t.learned?.[t.level_sensor || sensor] ?? 0 : 0;
     const now = [];
-    if (t.weather) now.push(`the weather ${t.weather_pct == null ? "no answer" : `${esc(t.weather_pct)} % of a clear day${t.cloud_cover != null ? `, ${esc(t.cloud_cover)} % cloud` : ""}`}`);
-    if (sensor) {
-      now.push(t.level == null ? "the light sensor no reading"
-        : `the light sensor ${esc(t.level)} lx${t.sensor_pct == null ? ` (still learning what a clear day looks like at this sun height; ${learned} learned so far)` : `, ${esc(t.sensor_pct)} % of a clear day`}`);
-    }
+    if (t.weather) now.push(`Weather: ${this._weatherNow(t)}`);
+    if (sensor) now.push(`Light sensor: ${this._sensorNow(t, learned)}`);
     const pct = t.brightness_pct ?? 100;
     const periods = t.periods?.length ? list(t.periods.map(esc)) : "no periods";
     return `<div><ha-icon icon="${TRACK_ICON[house.track]}"></ha-icon> Today is a <b>${esc(TRACK_LABEL[house.track])}</b>${t.reason ? `: ${esc(t.reason)}` : ""}.${house.track_by_hand ? " Chosen by hand until the next period." : ""}</div>
       <div class="meta">Dark Days can happen in ${periods}: when the sun is down, or the light is below <b>${esc(t.dark_below_pct)} %</b> of a clear day at the same sun height (Normal again above <b>${esc(t.normal_above_pct)} %</b>). ${from}
       Dark Day brightness for Normal looks: ${pct === 100 ? "unchanged" : `<b>${esc(pct)} %</b>`}.</div>
-      <div class="meta">Now: ${now.join("; ")}. The sun is at ${esc(t.sun_elevation)}°.</div>`;
+      <div class="meta nowlines">${now.map((l) => `<div>${l}</div>`).join("")}<div>Sun: ${t.sun_down ? `below the horizon (${esc(t.sun_elevation)}°)` : `${esc(t.sun_elevation)}° above the horizon`}.</div></div>`;
+  }
+
+  _weatherNow(t) {
+    switch (t.weather_state) {
+      case "ok":
+        return `<b>${esc(t.weather_pct)} %</b> of a clear day${t.cloud_cover != null ? `, ${esc(t.cloud_cover)} % cloud` : ""} (at ${esc(hhmm(t.weather_at))}).`;
+      case "sun_down":
+        return "nothing to compare while the sun is down.";
+      case "unreachable":
+        return `<span class="warntext">couldn't reach Open-Meteo${t.weather_at ? ` (last answer at ${esc(hhmm(t.weather_at))})` : ""}.</span> It tries again every 15 minutes.`;
+      case "stale":
+        return `<span class="warntext">no fresh answer since ${esc(hhmm(t.weather_at))}.</span>`;
+      case "waiting":
+        return "waiting for the first answer.";
+      default:
+        return "off.";
+    }
+  }
+
+  _sensorNow(t, learned) {
+    const lx = t.level == null ? "" : `${esc(t.level)} lx`;
+    switch (t.sensor_state) {
+      case "ok":
+        return `${lx}, <b>${esc(t.sensor_pct)} %</b> of a clear day.`;
+      case "sun_down":
+        return `${lx}; nothing to compare while the sun is down.`;
+      case "learning":
+        return `${lx}; still learning what a clear day looks like to it at this sun height (${esc(learned)} sun heights learned so far).`;
+      case "no_reading":
+        return `<span class="warntext">no reading (the sensor is unavailable).</span>`;
+      default:
+        return "none chosen.";
+    }
   }
 
   _stealthBanner() {

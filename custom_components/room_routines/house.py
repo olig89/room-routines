@@ -78,7 +78,7 @@ from .core.room import (
 from .core.serial import room_from, schedule_from, tracks_from
 from .core.daylight import MIN_ELEVATION, DaylightReference
 from .core.sun import SunPosition, clear_sky, position
-from .core.tracks import TrackChooser, default_periods
+from .core.tracks import WEATHER_STALE, TrackChooser, default_periods
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -630,6 +630,7 @@ class House:
         self._daylight_store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, f"{DOMAIN}.daylight")
         self._learned: dict[str, datetime] = {}  # sensor -> statistics read up to
         self.weather: dict[str, Any] = {}  # the last weather answer, for the page
+        self.weather_failed_at: datetime | None = None  # the last fetch that failed, if after the last answer
         self.rooms = {rid: RoomRunner(self, setup) for rid, setup in rooms_from(self.options).items()}
         self._unsub_period: CALLBACK_TYPE | None = None
         self._unsubs: list[CALLBACK_TYPE] = []
@@ -771,7 +772,39 @@ class House:
             "learned": {s: r.learned for s, r in self.chooser.references.items()},
             "sun_elevation": round(sun.elevation, 1),
             "sun_down": sun.elevation < MIN_ELEVATION,
+            "weather_state": self._weather_state(now, sun, weather.pct),
+            "weather_at": self.weather["at"].isoformat() if self.weather.get("at") else None,
+            "sensor_state": self._sensor_state(sun, sensor),
         }
+
+    def _weather_state(self, now: datetime, sun: SunPosition, pct: float | None) -> str:
+        """Why the weather says what it says: off / unreachable / sun_down /
+        waiting / ok / stale."""
+        if not self.tracks.weather:
+            return "off"
+        if self.weather_failed_at is not None:
+            return "unreachable"
+        if sun.elevation < MIN_ELEVATION:
+            return "sun_down"
+        if not self.weather:
+            return "waiting"
+        if pct is not None:
+            return "ok"
+        # An answer with no percentage: its sunlight was measured with the sun still
+        # too low (just after sunrise), unless it's simply old.
+        if self.weather.get("pct") is None and now - self.weather["at"] <= WEATHER_STALE:
+            return "sun_down"
+        return "stale"
+
+    def _sensor_state(self, sun: SunPosition, reading) -> str:
+        """none / no_reading / sun_down / learning / ok."""
+        if not self.tracks.has_sensor:
+            return "none"
+        if reading.lux is None:
+            return "no_reading"
+        if sun.elevation < MIN_ELEVATION:
+            return "sun_down"
+        return "ok" if reading.pct is not None else "learning"
 
     # -- the weather --
 
@@ -801,6 +834,8 @@ class House:
             cloud = current.get("cloud_cover")
         except Exception as err:  # noqa: BLE001 - any failure: keep the last answer until it's stale
             _LOGGER.debug("Couldn't get the weather from Open-Meteo: %s", err)
+            self.weather_failed_at = dt_util.now()
+            self._announce()
             return
         self.take_weather(radiation, at, interval, cloud)
 
@@ -811,7 +846,10 @@ class House:
         sun = position(lat, lon, at - timedelta(seconds=interval / 2))
         clear = clear_sky(sun.elevation)
         pct = round(100 * radiation / clear, 1) if sun.elevation >= MIN_ELEVATION and clear > 0 else None
-        self.weather = {"radiation": radiation, "clear": round(clear), "cloud_cover": cloud, "pct": pct}
+        self.weather = {
+            "radiation": radiation, "clear": round(clear), "cloud_cover": cloud, "pct": pct, "at": dt_util.now(),
+        }
+        self.weather_failed_at = None
         self.chooser.weather(pct, dt_util.now())
         self._check_track(dt_util.now())
 

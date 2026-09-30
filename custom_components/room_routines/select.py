@@ -83,6 +83,8 @@ class TrackSelect(HouseEntity, SelectEntity):
             "source": status["source"],
             "reason": status["reason"],
             "weather_pct": status["weather_pct"],
+            "weather_state": status["weather_state"],
+            "light_sensor_state": status["sensor_state"],
             "light_sensor_pct": status["sensor_pct"],
             "light_level": status["level"],
             "light_sensor": status["level_sensor"],

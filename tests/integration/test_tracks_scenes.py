@@ -1,7 +1,9 @@
 """End to end: Normal days and Dark Days, scene looks, and learning from hand changes."""
 
 from datetime import timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import aiohttp
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
@@ -14,13 +16,14 @@ from custom_components.room_routines.const import DOMAIN
 from custom_components.room_routines.core.habits import Change
 from custom_components.room_routines.core.looks import LightTarget
 from custom_components.room_routines.core.room import ADJUSTED
-from custom_components.room_routines.house import scene_lights
+from custom_components.room_routines.house import House, scene_lights
 
 from .test_integration import CEILING, LUX, MODE, MONDAY_EVENING, MOTION, STATUS, motion, options, wait
 
 WINDOW = "sensor.window_lux"
 TRACK = "select.room_routines_track"
 SCENE = "scene.wc_evening"
+REAL_FETCH = House._fetch_weather  # kept before the fixture below replaces it
 MONDAY_NOON = "2026-09-28 09:00:00+00:00"  # 12:00 in Tallinn, sun at about 28 degrees
 
 
@@ -125,6 +128,39 @@ async def test_the_weather_decides_by_day_and_a_lit_room_follows_after_the_hold(
     await weather(hass, 400)
     assert hass.states.get(TRACK).state == "normal"
     assert "Normal day" in hass.states.get(STATUS).attributes["reason"]
+
+
+async def test_the_page_says_why_there_is_no_figure(hass, lights, freezer):
+    await start(hass)  # Monday evening in Tallinn: the sun is down
+    a = hass.states.get(TRACK).attributes
+    assert a["weather_state"] == "sun_down" and a["light_sensor_state"] == "sun_down"
+
+    freezer.move_to("2026-09-29 09:00:00+00:00")  # Tuesday 12:00 in Tallinn (forwards, so timers fire)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    a = hass.states.get(TRACK).attributes
+    assert a["weather_state"] == "waiting"  # no answer yet
+    assert a["light_sensor_state"] == "learning"  # 300 lx, but no clear-day reference yet
+
+    session = MagicMock()
+    session.get = AsyncMock(side_effect=aiohttp.ClientError("no route"))
+    with patch("custom_components.room_routines.house.async_get_clientsession", return_value=session):
+        await REAL_FETCH(house(hass))
+    await hass.async_block_till_done()
+    assert hass.states.get(TRACK).attributes["weather_state"] == "unreachable"
+
+    await weather(hass, 200)
+    a = hass.states.get(TRACK).attributes
+    assert a["weather_state"] == "ok" and a["weather_pct"] is not None
+
+    freezer.tick(timedelta(hours=2))  # the answer goes stale
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert hass.states.get(TRACK).attributes["weather_state"] == "stale"
+
+    hass.states.async_set(WINDOW, "unavailable")
+    await hass.async_block_till_done()
+    assert hass.states.get(TRACK).attributes["light_sensor_state"] == "no_reading"
 
 
 async def test_no_reading_keeps_the_day(hass, lights, freezer):
