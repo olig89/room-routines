@@ -51,6 +51,7 @@ class RoomStatusSensor(RoomEntity, SensorEntity):
         attrs: dict[str, Any] = {
             "reason": room.last.reason if room else None,
             "period": self.house.period,
+            "track": self.house.track,
             "mode": self.runner.mode,
             "stealth": self.house.stealth,
         }

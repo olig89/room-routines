@@ -4,8 +4,14 @@ A look lists, per light, whether it is on and how. ``brightness_pct=None`` on
 a light that is on means "at its last brightness": a plain switch-on, which is
 what a KNX motion sensor does today and what the first looks copy.
 
+A look can instead turn on a Home Assistant scene (``scene``), so scenes can be
+built and kept in Home Assistant and shared with wall buttons and dashboards.
+
 A look can also be "do nothing" (``NOTHING``): the room stays dark in that
 period. A period with no look of its own borrows the previous period's.
+
+Each room has a Normal set of looks and, optionally, a Dim set for dark days
+(see ``tracks``). A period without a Dim look uses its Normal one.
 
 Blinds can be listed in a look, but they are never moved by motion; the room
 only moves them when a new period starts, and only if the room asks for it.
@@ -14,9 +20,10 @@ only moves them when a new period starts, and only if the room asks for it.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from .periods import Schedule
+from .tracks import NORMAL
 
 MIN_BRIGHTNESS_PCT = 1.0
 
@@ -44,6 +51,11 @@ class Look:
     lights: Mapping[str, LightTarget] = field(default_factory=dict)
     blinds: Mapping[str, int] = field(default_factory=dict)  # cover position 0-100
     nothing: bool = False
+    scene: str | None = None  # a scene entity to turn on instead of set lights
+
+    def __post_init__(self) -> None:
+        if self.scene and (self.lights or self.nothing):
+            raise ValueError("a scene look can't also list lights or be 'nothing'")
 
     def lit(self) -> list[str]:
         return [light for light, target in self.lights.items() if target.on]
@@ -52,30 +64,41 @@ class Look:
 NOTHING = Look(nothing=True)
 
 
-def look_for(period: str, looks: Mapping[str, Look], schedule: Schedule) -> Look:
-    """The room's look for ``period``, falling back through earlier periods."""
+@dataclass(frozen=True)
+class LookSource:
+    """The look a room uses, and the period and track it was saved under."""
+
+    look: Look
+    period: str | None
+    track: str
+
+
+def resolve(
+    period: str,
+    track: str,
+    looks: Mapping[str, Look],
+    dim_looks: Mapping[str, Look] | None,
+    schedule: Schedule,
+) -> LookSource:
+    """The room's look for ``period`` on ``track``.
+
+    Walks back through the periods like ``look_for``. On the Dim track a
+    period's Dim look wins; a period with only a Normal look uses that, so Dim
+    looks are only needed where they differ.
+    """
     name = period
     for _ in range(len(schedule.periods)):
+        if track != NORMAL and dim_looks and name in dim_looks:
+            return LookSource(dim_looks[name], name, track)
         if name in looks:
-            return looks[name]
+            return LookSource(looks[name], name, NORMAL)
         name = schedule.previous(name)
-    return NOTHING
+    return LookSource(NOTHING, None, NORMAL)
 
 
-def scaled(look: Look, factor: float) -> Look:
-    """The look with every set brightness multiplied by ``factor``.
-
-    Lights at their last brightness are left alone: there is no number to scale.
-    """
-    if factor == 1.0 or look.nothing:
-        return look
-    lights = {}
-    for light, target in look.lights.items():
-        if target.on and target.brightness_pct is not None:
-            pct = min(100.0, max(MIN_BRIGHTNESS_PCT, round(target.brightness_pct * factor, 1)))
-            target = replace(target, brightness_pct=pct)
-        lights[light] = target
-    return replace(look, lights=lights)
+def look_for(period: str, looks: Mapping[str, Look], schedule: Schedule) -> Look:
+    """The room's Normal look for ``period``, falling back through earlier periods."""
+    return resolve(period, NORMAL, looks, None, schedule).look
 
 
 def uniform(lights: list[str] | tuple[str, ...], target: LightTarget = ON) -> Look:

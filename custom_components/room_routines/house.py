@@ -12,8 +12,17 @@ In **log-only** mode nothing is sent. The room then runs on its own belief about
 its lights (it assumes its commands worked), and real light changes are not fed
 in, so what it logs is what it would have done. **Off** ignores everything.
 
-The house keeps the current period (with a timer for the next one) and the
-stealth switch, and passes both to every room.
+The house keeps the current period (with a timer for the next one), the
+stealth switch and the day's track (Normal or Dim, from one light sensor), and
+passes them to every room. It also keeps the log of hand changes (in Home
+Assistant's storage) that the page's suggestions come from.
+
+A look can be a Home Assistant scene. Turning it on is Home Assistant's job;
+the room reads the scene's settings where it can (scenes made in Home
+Assistant) so it can recognise the result as its own and step-fade lights that
+can't fade themselves. A scene it can't read (a Hue app scene) is turned on
+as it is, and any change to the room's lights in the next few seconds counts as
+the scene's.
 """
 
 from __future__ import annotations
@@ -40,20 +49,42 @@ from homeassistant.helpers.event import (
     async_call_later,
     async_track_point_in_time,
     async_track_state_change_event,
+    async_track_time_interval,
 )
+from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import ANY_SIGNAL, DOMAIN, MODE_LIVE, MODE_LOG_ONLY, MODE_OFF, house_signal, room_signal
 from .core.fade import plan_fade
-from .core.looks import OFF, LightTarget, Look
+from .core.habits import Change, Suggestion, change_from, change_to, suggest
+from .core.looks import OFF, LightTarget, Look, resolve
 from .core.matching import Command, OwnChangeMatcher
 from .core.periods import Schedule
-from .core.room import ApplyLook, Decision, MoveBlinds, Room, RoomConfig, TurnOff, WakeAt
-from .core.serial import room_from, schedule_from
+from .core.room import (
+    ADJUSTED,
+    ApplyLook,
+    Decision,
+    HandChange,
+    MoveBlinds,
+    Room,
+    RoomConfig,
+    State,
+    TurnOff,
+    WakeAt,
+)
+from .core.serial import room_from, schedule_from, tracks_from
+from .core.tracks import TrackChooser
 
 _LOGGER = logging.getLogger(__name__)
 
 BULB_WAIT = timedelta(seconds=10)  # how long to wait for smart bulbs after powering their circuit
+SETTLE = timedelta(seconds=10)  # after a hand change, when to read how the lights ended up
+TRACK_CHECK = timedelta(minutes=1)
+KEEP_CHANGES = timedelta(days=60)
+MAX_CHANGES = 2000
+DISMISS_FOR = timedelta(days=28)
+STORE_VERSION = 1
+SCENE_PLATFORM = "homeassistant_scene"  # Home Assistant's own (YAML / editor) scenes
 
 
 def brightness_pct(state) -> float | None:
@@ -95,6 +126,7 @@ class RoomRunner:
         # remembers its last level (a KNX DALI light) would otherwise come back
         # at the dimmed level the fade left it at.
         self._before_fade: dict[str, float] = {}
+        self._pending_change: CALLBACK_TYPE | None = None
 
     # -- life cycle --
 
@@ -117,6 +149,9 @@ class RoomRunner:
         if self._wake:
             self._wake()
             self._wake = None
+        if self._pending_change:
+            self._pending_change()
+            self._pending_change = None
         self._cancel_fades()
 
     def _cancel_fades(self) -> None:
@@ -130,7 +165,7 @@ class RoomRunner:
         lights_on = self.mode == MODE_LIVE and self._any_on()
         self.room = Room(
             self.config, self.house.schedule, self.house.period, lights_on, now,
-            stealth=self.house.stealth,
+            stealth=self.house.stealth, track=self.house.track,
         )
         for sensor in (*self.config.triggers, *self.config.holds):
             state = self.hass.states.get(sensor)
@@ -218,6 +253,16 @@ class RoomRunner:
         self._run(self.room.period_changed(period, dt_util.now()))
 
     @callback
+    def track_changed(self, track: str) -> None:
+        if self.room is None:
+            return
+        if self.mode == MODE_OFF:
+            self.room.track = track
+            self._notify()
+            return
+        self._run(self.room.track_changed(track, dt_util.now()))
+
+    @callback
     def stealth_changed(self, on: bool) -> None:
         if self.room is None:
             return
@@ -237,6 +282,8 @@ class RoomRunner:
 
     @callback
     def _run(self, decision: Decision) -> None:
+        if decision.change is not None and self.mode == MODE_LIVE:
+            self._note_change(decision.change)
         acting = False
         for action in decision.actions:
             if isinstance(action, WakeAt):
@@ -261,6 +308,42 @@ class RoomRunner:
             prefix = "" if self.mode == MODE_LIVE else "Log only: would act. "
             self.hass.async_create_task(self._log(prefix + decision.reason))
         self._notify()
+
+    # -- hand changes --
+
+    def _note_change(self, change: HandChange) -> None:
+        """Remember a hand change. An adjustment is read once the lights settle."""
+        if self._pending_change:
+            self._pending_change()
+            self._pending_change = None
+        if change.kind != ADJUSTED:
+            self.house.record_change(self._change(change, None))
+            return
+
+        @callback
+        def _settled(_now) -> None:
+            self._pending_change = None
+            if self.room is None or self.room.state is not State.OWNED:
+                return  # switched off meanwhile: that is recorded on its own
+            lights = capture(self.hass, self.config).lights
+            if any(t.on for t in lights.values()):
+                self.house.record_change(self._change(change, lights))
+
+        self._pending_change = async_call_later(self.hass, SETTLE.total_seconds(), _settled)
+
+    def _change(self, change: HandChange, lights) -> Change:
+        return Change(
+            dt_util.now(), self.room_id, change.kind, change.period, change.track,
+            change.after.total_seconds(), dict(lights) if lights is not None else None,
+        )
+
+    def look_of(self, period: str, track: str) -> Look | None:
+        """A period's look as lights, for comparing with hand changes (None if unreadable)."""
+        look = resolve(period, track, self.config.looks, self.config.dim_looks, self.house.schedule).look
+        if look.scene:
+            lights = scene_lights(self.hass, look.scene, self.config.switchable())
+            return None if lights is None else Look(lights)
+        return look
 
     def _notify(self) -> None:
         async_dispatcher_send(self.hass, room_signal(self.house.entry.entry_id, self.room_id))
@@ -308,6 +391,9 @@ class RoomRunner:
         return "steps"
 
     async def _apply(self, action: ApplyLook) -> None:
+        if action.look.scene:
+            await self._apply_scene(action)
+            return
         for circuit in action.power_first:
             state = self.hass.states.get(circuit)
             if state is None or state.state != STATE_ON:
@@ -328,6 +414,33 @@ class RoomRunner:
             await self._send(light, target, action.transition if how == "transition" else None)
         if fading:
             self._fade(fading, action.transition)
+
+    async def _apply_scene(self, action: ApplyLook) -> None:
+        scene = action.look.scene
+        if self.hass.states.get(scene) is None:
+            _LOGGER.warning("%s: scene %s doesn't exist, so nothing was switched", self.config.name, scene)
+            return
+        lights = scene_lights(self.hass, scene, self.config.switchable())
+        transition = action.transition
+        if lights and transition and any(self._how_to_fade(l, transition) == "steps" for l in lights):
+            # Some lights can't fade themselves: do the drift from the scene's
+            # settings, light by light, as for any other look.
+            await self._apply(ApplyLook(Look(lights), action.power_first, transition))
+            return
+        ctx = Context()
+        now = dt_util.now()
+        if lights is None:
+            for light in self.config.switchable():
+                self.matcher.record(Command(light, ctx.id, now, True, anything=True))
+        else:
+            for light, target in lights.items():
+                self.matcher.record(
+                    Command(light, ctx.id, now, target.on, target.brightness_pct if target.on else None)
+                )
+        data: dict[str, Any] = {ATTR_ENTITY_ID: scene}
+        if transition:
+            data["transition"] = transition.total_seconds()
+        await self.hass.services.async_call("scene", "turn_on", data, context=ctx)
 
     def _fade(self, targets: Mapping[str, LightTarget], duration: timedelta) -> None:
         current: dict[str, float | None] = {}
@@ -378,6 +491,27 @@ class RoomRunner:
 COLOUR_MODES = {"rgb", "rgbw", "rgbww", "hs", "xy"}
 
 
+def target_of(state) -> LightTarget:
+    """A light's state (live, or as stored in a scene) as a look's target."""
+    if state.state != STATE_ON:
+        return OFF
+    mode = state.attributes.get("color_mode")
+    kelvin = state.attributes.get("color_temp_kelvin")
+    rgb = state.attributes.get("rgb_color")
+    if mode is not None:
+        kelvin = kelvin if mode == "color_temp" else None
+        rgb = rgb if mode in COLOUR_MODES else None
+    elif kelvin and rgb:
+        rgb = None
+    pct = brightness_pct(state)
+    return LightTarget(
+        True,
+        pct if pct is None or pct > 0 else 1.0,
+        int(kelvin) if kelvin else None,
+        tuple(int(c) for c in rgb) if rgb else None,
+    )
+
+
 def capture(hass: HomeAssistant, config: RoomConfig) -> Look:
     """The room's lights as they are now, as a look."""
     lights: dict[str, LightTarget] = {}
@@ -385,19 +519,47 @@ def capture(hass: HomeAssistant, config: RoomConfig) -> Look:
         state = hass.states.get(light)
         if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             continue
-        if state.state != STATE_ON:
-            lights[light] = OFF
-            continue
-        mode = state.attributes.get("color_mode")
-        kelvin = state.attributes.get("color_temp_kelvin") if mode == "color_temp" else None
-        rgb = state.attributes.get("rgb_color") if mode in COLOUR_MODES else None
-        lights[light] = LightTarget(
-            True,
-            brightness_pct(state),
-            int(kelvin) if kelvin else None,
-            tuple(int(c) for c in rgb) if rgb else None,
-        )
+        lights[light] = target_of(state)
     return Look(lights)
+
+
+def scene_lights(hass: HomeAssistant, scene: str, lights) -> dict[str, LightTarget] | None:
+    """What a Home Assistant scene sets the given lights to, or None if it can't be read.
+
+    Only scenes made in Home Assistant (the scene editor or scenes.yaml) can be
+    read; a scene from another integration (the Hue app's) can't.
+    """
+    platform = hass.data.get(SCENE_PLATFORM)
+    entity = getattr(platform, "entities", {}).get(scene) if platform is not None else None
+    states = getattr(getattr(entity, "scene_config", None), "states", None)
+    if not isinstance(states, Mapping):
+        return None
+    return {light: target_of(states[light]) for light in lights if light in states}
+
+
+def scene_entities(hass: HomeAssistant, lights) -> dict[str, dict[str, Any]]:
+    """The lights as they are now, in the form a Home Assistant scene stores."""
+    out: dict[str, dict[str, Any]] = {}
+    for light in lights:
+        state = hass.states.get(light)
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            continue
+        if state.state != STATE_ON:
+            out[light] = {"state": "off"}
+            continue
+        entry: dict[str, Any] = {"state": "on"}
+        for key in ("brightness", "color_mode", "color_temp_kelvin", "hs_color", "rgb_color", "xy_color", "effect"):
+            value = state.attributes.get(key)
+            if value is None:
+                continue
+            mode = state.attributes.get("color_mode")
+            if key == "color_temp_kelvin" and mode != "color_temp":
+                continue
+            if key in ("hs_color", "rgb_color", "xy_color") and mode not in COLOUR_MODES:
+                continue
+            entry[key] = list(value) if isinstance(value, tuple) else value
+        out[light] = entry
+    return out
 
 
 def rooms_from(options: Mapping[str, Any]) -> dict[str, RoomSetup]:
@@ -415,7 +577,7 @@ def structure(options: Mapping[str, Any]) -> dict[str, Any]:
     the house can take them without a reload (and without forgetting which
     lights it switched on)."""
     rooms = {
-        room_id: {k: v for k, v in data.items() if k != "looks"}
+        room_id: {k: v for k, v in data.items() if k not in ("looks", "dim_looks")}
         for room_id, data in (options.get("rooms") or {}).items()
     }
     return {**options, "rooms": rooms}
@@ -433,12 +595,33 @@ class House:
         self.stealth = False
         self.period_entity_id: str | None = None
         self.stealth_entity_id: str | None = None
+        self.track_entity_id: str | None = None
+        self.tracks = tracks_from(self.options)
+        self.chooser = TrackChooser(self.tracks)
+        self.changes: list[Change] = []
+        self.dismissed: dict[str, str] = {}  # suggestion key -> hidden until (ISO)
+        self._store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, f"{DOMAIN}.habits")
         self.rooms = {rid: RoomRunner(self, setup) for rid, setup in rooms_from(self.options).items()}
         self._unsub_period: CALLBACK_TYPE | None = None
+        self._unsubs: list[CALLBACK_TYPE] = []
+
+    @property
+    def track(self) -> str:
+        return self.chooser.track
+
+    async def async_load(self) -> None:
+        data = await self._store.async_load() or {}
+        for row in data.get("changes") or []:
+            try:
+                self.changes.append(change_from(row))
+            except (KeyError, ValueError, TypeError):
+                continue
+        self.dismissed = dict(data.get("dismissed") or {})
 
     @callback
     def start(self) -> None:
         self._schedule_next()
+        self._start_tracks()
         for runner in self.rooms.values():
             runner.start()
         # The entities wrote their first state before the next start was known.
@@ -453,8 +636,87 @@ class House:
         if self._unsub_period:
             self._unsub_period()
             self._unsub_period = None
+        while self._unsubs:
+            self._unsubs.pop()()
         for runner in self.rooms.values():
             runner.stop()
+
+    # -- Normal and Dim days --
+
+    def _start_tracks(self) -> None:
+        sensors = [s for s in (self.tracks.sensor, self.tracks.fallback) if s]
+        if not sensors:
+            return
+        now = dt_util.now()
+        for sensor in sensors:
+            self._track_reading(sensor, self.hass.states.get(sensor), now)
+        self.chooser.update(now, first=True)
+        self._unsubs.append(async_track_state_change_event(self.hass, sensors, self._on_track_sensor))
+        self._unsubs.append(async_track_time_interval(self.hass, self._track_tick, TRACK_CHECK))
+
+    def _track_reading(self, sensor: str, state, now: datetime) -> None:
+        value: float | None
+        try:
+            value = float(state.state) if state is not None else None
+        except ValueError:
+            value = None
+        self.chooser.reading(sensor, value, now)
+
+    @callback
+    def _on_track_sensor(self, event: Event[EventStateChangedData]) -> None:
+        now = dt_util.now()
+        self._track_reading(event.data["entity_id"], event.data["new_state"], now)
+        self._track_tick(now)
+
+    @callback
+    def _track_tick(self, now: datetime) -> None:
+        if self.chooser.update(dt_util.now()):
+            self._set_track()
+        else:
+            self._announce()  # the light level shown moves on
+
+    def _set_track(self) -> None:
+        for runner in self.rooms.values():
+            runner.track_changed(self.track)
+        self._announce()
+
+    @callback
+    def override_track(self, track: str) -> None:
+        """Chosen by hand: holds until the next period starts."""
+        if self.chooser.choose(track, dt_util.now()):
+            self._set_track()
+        else:
+            self._announce()
+
+    def light_level(self) -> tuple[float | None, str | None]:
+        return self.chooser.level(dt_util.now())
+
+    # -- hand changes --
+
+    def record_change(self, change: Change) -> None:
+        cutoff = change.at - KEEP_CHANGES
+        self.changes = [c for c in self.changes if c.at >= cutoff][-(MAX_CHANGES - 1):] + [change]
+        self._save()
+        self._announce()
+
+    def dismiss(self, key: str) -> None:
+        self.dismissed[key] = (dt_util.now() + DISMISS_FOR).isoformat()
+        self._save()
+        self._announce()
+
+    def _save(self) -> None:
+        self._store.async_delay_save(
+            lambda: {"changes": [change_to(c) for c in self.changes], "dismissed": self.dismissed}, 5
+        )
+
+    def suggestions(self, runner: RoomRunner) -> list[Suggestion]:
+        now = dt_util.now()
+        hidden = {
+            key for key, until in self.dismissed.items()
+            if (t := dt_util.parse_datetime(until)) is not None and t > now
+        }
+        found = suggest(self.changes, runner.room_id, runner.config.name, self.schedule, runner.look_of, now)
+        return [s for s in found if s.key not in hidden]
 
     def _schedule_next(self) -> None:
         now = self.schedule.current(dt_util.now())
@@ -467,6 +729,9 @@ class House:
         # Schedule first, so what _set_period announces carries the new next start.
         self._schedule_next()
         self._set_period(self.schedule.current(now).name)
+        # A track chosen by hand also holds only until the next period.
+        if self.chooser.release(dt_util.now()):
+            self._set_track()
 
     def _set_period(self, name: str) -> None:
         if name != self.period:

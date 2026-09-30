@@ -2,7 +2,7 @@ from datetime import timedelta
 
 import pytest
 
-from custom_components.room_routines.core.lux import AmbientTracker, Scaling, dark_enough
+from custom_components.room_routines.core.lux import AmbientTracker, dark_enough
 
 from .conftest import at
 
@@ -44,18 +44,3 @@ def test_stale_ambient_counts_as_unknown():
 )
 def test_dark_enough(ambient, threshold, expected):
     assert dark_enough(ambient, threshold) is expected
-
-
-def test_scaling_eases_from_full_to_minimum():
-    s = Scaling(full_dark=5, threshold=50, min_factor=0.3)
-    assert s.factor(None) == 1.0
-    assert s.factor(2) == 1.0
-    assert s.factor(50) == 0.3
-    assert s.factor(200) == 0.3
-    assert s.factor(27.5) == pytest.approx(0.65)
-
-
-@pytest.mark.parametrize("kwargs", [{"full_dark": 50, "threshold": 50}, {"min_factor": 0}])
-def test_bad_scaling_refused(kwargs):
-    with pytest.raises(ValueError):
-        Scaling(**kwargs)

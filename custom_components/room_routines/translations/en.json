@@ -154,6 +154,13 @@
           "log_only": "Log only",
           "live": "Live"
         }
+      },
+      "track": {
+        "name": "Track",
+        "state": {
+          "normal": "Normal",
+          "dim": "Dim"
+        }
       }
     },
     "sensor": {
@@ -178,7 +185,7 @@
   "services": {
     "set_look": {
       "name": "Save a room look",
-      "description": "Saves what a room's lights should do in a period.",
+      "description": "Saves what a room's lights should do in a period, on Normal or Dim days.",
       "fields": {
         "entity_id": {
           "name": "Room",
@@ -190,7 +197,15 @@
         },
         "look": {
           "name": "Look",
-          "description": "'current' saves the room's lights as they are now; 'nothing' keeps the room dark in this period; 'borrow' removes the period's own look so it uses the previous period's."
+          "description": "'current' saves the room's lights as they are now; 'scene' turns on the scene below; 'nothing' keeps the room dark in this period; 'borrow' removes the period's own look (on Normal it uses the previous period's, on Dim its Normal look)."
+        },
+        "track": {
+          "name": "Track",
+          "description": "Normal (default) or Dim, the look for dark days."
+        },
+        "scene": {
+          "name": "Scene",
+          "description": "The scene to turn on, for look 'scene'."
         }
       }
     }

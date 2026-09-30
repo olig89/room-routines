@@ -31,6 +31,14 @@ down and goes dark as normal. Nothing else changes: periods, looks and blinds
 carry on. When stealth ends the sensors count again; one that sees someone at
 that moment acts like fresh motion.
 
+Dark days: the house tells every room which *track* it is on (Normal or Dim);
+a room uses its Dim look for the period where it has one. A track change in a
+lit room drifts to the new look, as a period change does.
+
+Hand changes: when someone changes a light the room switched on (dims it,
+switches it off), the decision carries a ``HandChange`` so the integration can
+remember it and, if it keeps happening, suggest a better look or schedule.
+
 Log-only mode lives in the integration, not here: it carries out no actions
 and reports the room's own commands back as light changes, so the room runs on
 what it *would* have done while the real lights follow the old wall-sensor
@@ -44,9 +52,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
-from .looks import Look, look_for, scaled
-from .lux import AmbientTracker, Scaling, dark_enough
+from .looks import Look, LookSource, resolve
+from .lux import AmbientTracker, dark_enough
 from .periods import Schedule
+from .tracks import NORMAL, TRACK_LABELS
 
 
 class State(Enum):
@@ -62,8 +71,8 @@ class RoomConfig:
     triggers: tuple[str, ...]
     holds: tuple[str, ...] = ()
     looks: Mapping[str, Look] = field(default_factory=dict)
+    dim_looks: Mapping[str, Look] = field(default_factory=dict)
     threshold_lux: float | None = 50.0
-    scaling: Scaling | None = None
     timeout: timedelta = timedelta(seconds=30)
     cooldown: timedelta = timedelta(seconds=30)
     drift: timedelta = timedelta(seconds=90)
@@ -114,11 +123,25 @@ class WakeAt:
 
 Action = ApplyLook | TurnOff | MoveBlinds | WakeAt
 
+ADJUSTED = "adjusted"
+SWITCHED_OFF = "switched_off"
+
+
+@dataclass(frozen=True)
+class HandChange:
+    """Someone changed lights the room had switched on."""
+
+    kind: str  # ADJUSTED or SWITCHED_OFF
+    period: str
+    track: str
+    after: timedelta  # since the room switched the lights on
+
 
 @dataclass(frozen=True)
 class Decision:
     actions: tuple[Action, ...] = ()
     reason: str = ""
+    change: HandChange | None = None
 
 
 # ---- the room ----------------------------------------------------------------
@@ -134,10 +157,13 @@ class Room:
         now: datetime,
         ambient: AmbientTracker | None = None,
         stealth: bool = False,
+        track: str = NORMAL,
     ) -> None:
         self.config = config
         self.schedule = schedule
         self.period = period
+        self.track = track
+        self.owned_at: datetime | None = None
         self.ambient = ambient or AmbientTracker()
         if lights_on:
             self.ambient.lights_changed(True, now)
@@ -162,13 +188,15 @@ class Room:
             return True
         return self.state is State.OWNED and self._any(self.config.holds)
 
-    def _look(self) -> Look:
-        return look_for(self.period, self.config.looks, self.schedule)
+    def source(self) -> LookSource:
+        return resolve(self.period, self.track, self.config.looks, self.config.dim_looks, self.schedule)
 
-    def _scaled(self, look: Look, now: datetime) -> Look:
-        if self.config.scaling is None:
-            return look
-        return scaled(look, self.config.scaling.factor(self.ambient.ambient(now)))
+    def _look(self) -> Look:
+        return self.source().look
+
+    def _look_name(self) -> str:
+        dim = self.source().track != NORMAL
+        return f"{self.period} {'Dim ' if dim else ''}look"
 
     def _power_for(self, look: Look) -> tuple[str, ...]:
         return tuple(sorted({self.config.powered_by[b] for b in look.lit() if b in self.config.powered_by}))
@@ -227,17 +255,21 @@ class Room:
             )
         look = self._look()
         if look.nothing:
-            return self._decide(f"motion at {entity}: {self.period} look is 'do nothing'")
-        look = self._scaled(look, now)
-        motion_look = Look(look.lights)  # motion never moves blinds
+            return self._decide(f"motion at {entity}: {self._look_name()} is 'do nothing'")
+        motion_look = Look(look.lights, scene=look.scene)  # motion never moves blinds
         self.state = State.OWNED
+        self.owned_at = now
         self.deadline = None
         self.ambient.lights_changed(True, now)
         lux = "unknown" if ambient is None else f"{ambient:g} lux"
         return self._decide(
-            f"motion at {entity}: {self.period} look (ambient {lux})",
+            f"motion at {entity}: {self._look_name()} (ambient {lux})",
             ApplyLook(motion_look, self._power_for(motion_look)),
         )
+
+    def _hand_change(self, kind: str, now: datetime) -> HandChange:
+        since = self.owned_at or now
+        return HandChange(kind, self.period, self.track, now - since)
 
     def lights(self, any_on: bool, own: bool, now: datetime) -> Decision:
         """A light in the room changed. ``any_on`` is the room after the change."""
@@ -252,30 +284,45 @@ class Room:
         if any_on:
             # Dimmed or partly switched by hand: an owned room keeps ownership
             # and still switches off after the timeout.
-            return self._unchanged() if self.state is State.MANUAL else self._decide(
-                "owned: adjusted by hand, still switches off when empty"
+            if self.state is State.MANUAL:
+                return self._unchanged()
+            self.last = Decision(
+                (), "owned: adjusted by hand, still switches off when empty", self._hand_change(ADJUSTED, now)
             )
+            return self.last
+        change = self._hand_change(SWITCHED_OFF, now) if self.state is State.OWNED else None
         self.state = State.IDLE
         self.deadline = None
+        self.owned_at = None
         self.cooldown_until = now + self.config.cooldown
-        return self._decide(
-            f"switched off by hand: motion ignored for {int(self.config.cooldown.total_seconds())} s"
+        self.last = Decision(
+            (), f"switched off by hand: motion ignored for {int(self.config.cooldown.total_seconds())} s", change
         )
+        return self.last
 
     def lux(self, value: float, now: datetime) -> bool:
         return self.ambient.reading(value, now)
 
     def period_changed(self, period: str, now: datetime) -> Decision:
         self.period = period
+        return self._restyle(f"period is now {period}", blinds=True)
+
+    def track_changed(self, track: str, now: datetime) -> Decision:
+        if track == self.track:
+            return self._unchanged()
+        self.track = track
+        return self._restyle(f"{TRACK_LABELS.get(track, track)} day", blinds=False)
+
+    def _restyle(self, reason: str, blinds: bool) -> Decision:
+        """The look changed under the room: move a lit room to it."""
         look = self._look()
         actions: list[Action] = []
-        reason = f"period is now {period}"
-        if self.config.blinds_with_periods and look.blinds:
+        if blinds and self.config.blinds_with_periods and look.blinds:
             actions.append(MoveBlinds(look.blinds))
         if self.state is State.OWNED and not look.nothing:
-            lit = self._scaled(Look(look.lights), now)
+            lit = Look(look.lights, scene=look.scene)
             actions.append(ApplyLook(lit, self._power_for(lit), self.config.drift))
-            reason += f": drifting to the {period} look"
+            reason += f": drifting to the {self._look_name()}"
         return self._decide(reason, *actions)
 
     def set_stealth(self, on: bool, now: datetime) -> Decision:
@@ -296,6 +343,7 @@ class Room:
             return self._decide("owned: occupied")
         self.state = State.IDLE
         self.deadline = None
+        self.owned_at = None
         self.ambient.lights_changed(False, now)
         fade = self.config.fade_out if self.config.fade_out > timedelta(0) else None
         return self._decide("empty for the timeout: lights off", TurnOff(self.config.switchable(), fade))

@@ -11,8 +11,11 @@ import uuid
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from .const import CONF_ALT_DAYS, CONF_PERIODS, CONF_ROOMS, clean_options
-from .core.serial import first_look, look_from, look_to, room_from, schedule_from
+from .const import CONF_ALT_DAYS, CONF_PERIODS, CONF_ROOMS, CONF_TRACKS, clean_options
+from .core.serial import first_look, look_from, look_to, room_from, schedule_from, tracks_from, tracks_to
+from .core.tracks import DIM, NORMAL, TRACKS
+
+LOOK_KEYS = {NORMAL: "looks", DIM: "dim_looks"}
 
 
 class SettingsError(ValueError):
@@ -63,9 +66,10 @@ def clean_room(user_input: Mapping[str, Any], previous: Mapping[str, Any] | None
         raise SettingsError("invalid_room")
     # Looks may only mention the room's lights.
     kept = set(room["lights"])
-    for look in (room.get("looks") or {}).values():
-        if "lights" in look:
-            look["lights"] = {light: t for light, t in look["lights"].items() if light in kept}
+    for key in LOOK_KEYS.values():
+        for look in (room.get(key) or {}).values():
+            if "lights" in look:
+                look["lights"] = {light: t for light, t in look["lights"].items() if light in kept}
     try:
         room_from(room)
     except (ValueError, KeyError, TypeError) as err:
@@ -133,13 +137,16 @@ def set_periods(
     names = {r["name"] for r in clean_rows}
     renames = dict(renames or {})
     for room in out[CONF_ROOMS].values():
-        looks: dict[str, Any] = {}
-        # Built fresh rather than edited in place, so two periods can swap names.
-        for period, look in (room.get("looks") or {}).items():
-            target = renames.get(period, period)
-            if target and target in names:
-                looks[target] = look
-        room["looks"] = looks
+        for key in LOOK_KEYS.values():
+            if key not in room:
+                continue
+            looks: dict[str, Any] = {}
+            # Built fresh rather than edited in place, so two periods can swap names.
+            for period, look in (room.get(key) or {}).items():
+                target = renames.get(period, period)
+                if target and target in names:
+                    looks[target] = look
+            room[key] = looks
     out[CONF_PERIODS] = clean_rows
     out[CONF_ALT_DAYS] = days
     return out
@@ -149,14 +156,21 @@ def set_periods(
 
 
 def set_look(
-    options: Mapping[str, Any], room_id: str, period: str, look: Mapping[str, Any] | None
+    options: Mapping[str, Any],
+    room_id: str,
+    period: str,
+    look: Mapping[str, Any] | None,
+    track: str = NORMAL,
 ) -> dict[str, Any]:
-    """A room's look for one period. ``None`` removes it (the period borrows the previous one)."""
+    """A room's look for one period on one track. ``None`` removes it: on Normal
+    the period then borrows the previous period's; on Dim it uses its Normal look."""
     out = _options(options)
     room = _room(out, room_id)
     if period not in {p.name for p in schedule_from(out).periods}:
         raise SettingsError("unknown_period")
-    looks = room.setdefault("looks", {})
+    if track not in TRACKS:
+        raise SettingsError("unknown_track")
+    looks = room.setdefault(LOOK_KEYS[track], {})
     if look is None:
         looks.pop(period, None)
         return out
@@ -167,4 +181,25 @@ def set_look(
         looks[period] = look_to(look_from(data))
     except (ValueError, TypeError, KeyError) as err:
         raise SettingsError("invalid_look") from err
+    return out
+
+
+# ---- dark days -----------------------------------------------------------------
+
+
+def set_tracks(options: Mapping[str, Any], data: Mapping[str, Any]) -> dict[str, Any]:
+    """The light sensor (and backup) that picks Normal or Dim days, and its thresholds.
+    No sensor at all turns dark days off: every room stays Normal."""
+    out = _options(options)
+    row = {
+        "sensor": data.get("sensor") or None,
+        "fallback": data.get("fallback") or None,
+        "dim_below": data.get("dim_below", 800),
+        "normal_above": data.get("normal_above", 1500),
+    }
+    try:
+        settings = tracks_from({CONF_TRACKS: row})
+    except (ValueError, TypeError) as err:
+        raise SettingsError("invalid_tracks") from err
+    out[CONF_TRACKS] = tracks_to(settings)
     return out

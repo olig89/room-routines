@@ -13,6 +13,10 @@ associating the change with the command's context, and on context alone it
 would look like a person. (Adaptive Lighting handles the same problem the same
 way.) It also covers each step of a stepped fade.
 
+A scene whose settings can't be read (one made in the Hue app, say) is
+recorded as "anything" for each of the room's lights: any change to them inside
+the settle window counts as the scene's doing.
+
 Known limit: a person pressing a wall switch to the same value inside the
 settle window is counted as the integration's own. Rare and harmless: the light
 is simply switched off later by the room's timeout.
@@ -31,6 +35,7 @@ class Command:
     at: datetime
     on: bool
     brightness_pct: float | None = None  # None while on = any brightness is fine
+    anything: bool = False  # any state is fine (a scene we can't read)
 
 
 class OwnChangeMatcher:
@@ -63,7 +68,11 @@ class OwnChangeMatcher:
         if (context_id and context_id in ids) or (parent_id and parent_id in ids):
             return True
         for c in self._commands:
-            if c.light != light or c.on != on:
+            if c.light != light:
+                continue
+            if c.anything:
+                return True
+            if c.on != on:
                 continue
             if not on or c.brightness_pct is None or brightness_pct is None:
                 return True

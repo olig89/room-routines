@@ -8,7 +8,7 @@ from typing import Any
 
 DOMAIN = "room_routines"
 NAME = "Room Routines"
-VERSION = "0.2.1"  # must match manifest.json and the panel (a test checks)
+VERSION = "0.3.0"  # must match manifest.json and the panel (a test checks)
 
 MODE_OFF = "off"
 MODE_LOG_ONLY = "log_only"
@@ -18,6 +18,7 @@ MODES = (MODE_OFF, MODE_LOG_ONLY, MODE_LIVE)
 CONF_PERIODS = "periods"
 CONF_ALT_DAYS = "alt_days"
 CONF_ROOMS = "rooms"
+CONF_TRACKS = "tracks"
 
 SERVICE_SET_LOOK = "set_look"
 
@@ -38,7 +39,7 @@ PANEL_COMPONENT = "room-routines-panel"
 STATIC_URL = "/room_routines_static"
 
 
-OPTION_KEYS = (CONF_PERIODS, CONF_ALT_DAYS, CONF_ROOMS)
+OPTION_KEYS = (CONF_PERIODS, CONF_ALT_DAYS, CONF_ROOMS, CONF_TRACKS)
 
 
 def clean_options(options: Mapping[str, Any]) -> dict[str, Any]:

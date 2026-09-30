@@ -50,30 +50,3 @@ class AmbientTracker:
 def dark_enough(ambient: float | None, threshold: float | None) -> bool:
     """Whether a room at ``ambient`` lux may switch on. No threshold = always."""
     return threshold is None or ambient is None or ambient < threshold
-
-
-@dataclass(frozen=True)
-class Scaling:
-    """Dimmer looks as a room gets lighter.
-
-    Full brightness at or below ``full_dark`` lux, easing down to ``min_factor``
-    at ``threshold`` lux.
-    """
-
-    full_dark: float = 5.0
-    threshold: float = 50.0
-    min_factor: float = 0.3
-
-    def __post_init__(self) -> None:
-        if not self.full_dark < self.threshold:
-            raise ValueError("full_dark must be below threshold")
-        if not 0 < self.min_factor <= 1:
-            raise ValueError("min_factor must be in (0, 1]")
-
-    def factor(self, ambient: float | None) -> float:
-        if ambient is None or ambient <= self.full_dark:
-            return 1.0
-        if ambient >= self.threshold:
-            return self.min_factor
-        share = (ambient - self.full_dark) / (self.threshold - self.full_dark)
-        return 1.0 - share * (1.0 - self.min_factor)

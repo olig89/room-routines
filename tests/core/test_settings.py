@@ -10,6 +10,7 @@ from custom_components.room_routines.settings import (
     remove_room,
     set_look,
     set_periods,
+    set_tracks,
     update_room,
 )
 
@@ -97,3 +98,33 @@ def test_set_look_only_keeps_the_rooms_lights_and_can_borrow():
     assert "Evening" not in options["rooms"][room_id]["looks"]
     with pytest.raises(SettingsError):
         set_look(options, room_id, "Brunch", None)
+
+
+def test_dim_looks_are_saved_apart_and_follow_period_renames():
+    options, rid = add_room(base(), ROOM)
+    options = set_look(options, rid, "Evening", {"scene": "scene.bath_dim"}, track="dim")
+    assert options["rooms"][rid]["dim_looks"] == {"Evening": {"scene": "scene.bath_dim"}}
+    assert "Evening" not in options["rooms"][rid]["looks"]
+    rows = [{**r, "name": "Dusk"} if r["name"] == "Evening" else r for r in options["periods"]]
+    options = set_periods(options, rows, [], {"Evening": "Dusk"})
+    assert options["rooms"][rid]["dim_looks"] == {"Dusk": {"scene": "scene.bath_dim"}}
+    options = set_look(options, rid, "Dusk", None, track="dim")
+    assert options["rooms"][rid]["dim_looks"] == {}
+    with pytest.raises(SettingsError):
+        set_look(options, rid, "Dusk", None, track="bright")
+
+
+def test_removing_a_light_drops_it_from_dim_looks_too():
+    options, rid = add_room(base(), ROOM)
+    look = {"lights": {"light.ceiling": {"on": True}, "light.mirror": {"on": False}}}
+    options = set_look(options, rid, "Day", look, track="dim")
+    options = update_room(options, rid, {"lights": ["light.ceiling"]})
+    assert options["rooms"][rid]["dim_looks"]["Day"] == {"lights": {"light.ceiling": {"on": True}}}
+
+
+def test_dark_day_settings():
+    options = set_tracks(base(), {"sensor": "sensor.window", "dim_below": 600, "normal_above": 1200})
+    assert options["tracks"] == {"sensor": "sensor.window", "fallback": None, "dim_below": 600.0, "normal_above": 1200.0}
+    assert "stray" not in options
+    with pytest.raises(SettingsError):
+        set_tracks(base(), {"sensor": "sensor.window", "dim_below": 900, "normal_above": 900})

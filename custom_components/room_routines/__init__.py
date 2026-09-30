@@ -21,7 +21,9 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import ANY_SIGNAL, DOMAIN, NAME, PANEL_COMPONENT, PANEL_URL, SERVICE_SET_LOOK, STATIC_URL, clean_options
 from .core.serial import look_to
+from .core.tracks import NORMAL, TRACKS
 from .house import House, capture, room_of
+from .settings import LOOK_KEYS
 from .websocket import async_register_websocket
 
 PLATFORMS = [Platform.SELECT, Platform.SENSOR, Platform.SWITCH]
@@ -30,6 +32,7 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 type RoomRoutinesConfigEntry = ConfigEntry[House]
 
 LOOK_CURRENT = "current"
+LOOK_SCENE = "scene"
 LOOK_NOTHING = "nothing"
 LOOK_BORROW = "borrow"
 
@@ -37,7 +40,9 @@ SET_LOOK_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_ENTITY_ID): cv.entity_id,
         vol.Optional("period"): cv.string,
-        vol.Optional("look", default=LOOK_CURRENT): vol.In([LOOK_CURRENT, LOOK_NOTHING, LOOK_BORROW]),
+        vol.Optional("track", default=NORMAL): vol.In(list(TRACKS)),
+        vol.Optional("look", default=LOOK_CURRENT): vol.In([LOOK_CURRENT, LOOK_SCENE, LOOK_NOTHING, LOOK_BORROW]),
+        vol.Optional("scene"): cv.entity_domain("scene"),
     }
 )
 
@@ -81,12 +86,16 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 f"There is no period called {period!r}. Periods: {', '.join(house.schedule.order())}"
             )
         options: dict[str, Any] = clean_options(house.entry.options)
-        looks = options["rooms"][runner.room_id].setdefault("looks", {})
+        looks = options["rooms"][runner.room_id].setdefault(LOOK_KEYS[call.data["track"]], {})
         kind = call.data["look"]
         if kind == LOOK_BORROW:
             looks.pop(period, None)
         elif kind == LOOK_NOTHING:
             looks[period] = {"nothing": True}
+        elif kind == LOOK_SCENE:
+            if not call.data.get("scene"):
+                raise ServiceValidationError("Choose the scene to turn on.")
+            looks[period] = {"scene": call.data["scene"]}
         else:
             look = capture(hass, runner.config)
             if not look.lit():
@@ -116,6 +125,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: RoomRoutinesConfigEntry)
         # this integration's own settings; drop them before anything reads the options.
         hass.config_entries.async_update_entry(entry, options=options)
     house = House(hass, entry)
+    await house.async_load()
     entry.runtime_data = house
     _remove_old_rooms(hass, entry, house)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

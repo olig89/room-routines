@@ -7,7 +7,6 @@ from custom_components.room_routines.core.looks import (
     LightTarget,
     Look,
     look_for,
-    scaled,
     uniform,
 )
 from custom_components.room_routines.core.periods import default_schedule
@@ -37,27 +36,6 @@ def test_do_nothing_look_is_honoured_not_skipped():
 
 def test_no_looks_at_all_means_do_nothing():
     assert look_for("Day", {}, default_schedule()).nothing
-
-
-def test_scaling_multiplies_set_brightness_only():
-    look = Look({"light.a": LightTarget(True, 80), "light.b": ON, "light.c": OFF})
-    half = scaled(look, 0.5)
-    assert half.lights["light.a"].brightness_pct == 40
-    assert half.lights["light.b"] == ON  # last brightness: nothing to scale
-    assert half.lights["light.c"] == OFF
-
-
-def test_scaling_never_goes_below_one_percent_or_above_100():
-    look = Look({"light.a": LightTarget(True, 2), "light.b": LightTarget(True, 90)})
-    assert scaled(look, 0.1).lights["light.a"].brightness_pct == 1.0
-    assert scaled(look, 2).lights["light.b"].brightness_pct == 100.0
-
-
-def test_scaling_keeps_colour_and_blinds():
-    look = Look({"light.a": LightTarget(True, 80, 2700)}, blinds={"cover.x": 20})
-    s = scaled(look, 0.5)
-    assert s.lights["light.a"].color_temp_kelvin == 2700
-    assert s.blinds == {"cover.x": 20}
 
 
 def test_uniform_copies_todays_plain_switch_on():

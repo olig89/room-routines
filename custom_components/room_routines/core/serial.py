@@ -5,6 +5,7 @@ The config entry's options hold plain JSON:
     {
       "periods": [{"name": "Overnight", "start": "23:00", "alt_start": null}, ...],
       "alt_days": [5, 6],
+      "tracks": {"sensor": "sensor.window_lux", "fallback": null, "dim_below": 800, "normal_above": 1500},
       "rooms": {
         "<room id>": {
           "name": "Downstairs Toilet",
@@ -14,11 +15,13 @@ The config entry's options hold plain JSON:
           "threshold_lux": 50, "timeout_s": 30, "cooldown_s": 30, "drift_s": 90, "fade_out_s": 15,
           "powered_by": {"<bulb>": "<power circuit>"},
           "blinds_with_periods": false,
-          "scaling": null | {"full_dark": 5, "threshold": 50, "min_factor": 0.3},
-          "looks": {"<period>": {"nothing": true} | {"lights": {...}, "blinds": {...}}}
+          "looks": {"<period>": {"nothing": true} | {"scene": "scene.x"} | {"lights": {...}, "blinds": {...}}},
+          "dim_looks": {"<period>": ...}   (same form; the Dim track, for dark days)
         }
       }
     }
+
+No "tracks" (or no sensor in it) means every room stays on Normal.
 
 A look's light is ``{"on": true, "brightness_pct": 60, "color_temp_kelvin": 2700}``;
 ``brightness_pct`` left out means "on at its last brightness".
@@ -31,9 +34,9 @@ from datetime import time, timedelta
 from typing import Any
 
 from .looks import NOTHING, LightTarget, Look
-from .lux import Scaling
 from .periods import Period, Schedule, default_schedule
 from .room import RoomConfig
+from .tracks import DEFAULT_DIM_BELOW, DEFAULT_NORMAL_ABOVE, TrackSettings
 
 DEFAULT_THRESHOLD_LUX = 50.0
 DEFAULT_TIMEOUT_S = 30
@@ -103,6 +106,8 @@ def target_to(target: LightTarget) -> dict[str, Any]:
 def look_from(data: Mapping[str, Any]) -> Look:
     if data.get("nothing"):
         return NOTHING
+    if data.get("scene"):
+        return Look(scene=str(data["scene"]))
     return Look(
         {light: target_from(t) for light, t in (data.get("lights") or {}).items()},
         {cover: int(pos) for cover, pos in (data.get("blinds") or {}).items()},
@@ -112,6 +117,8 @@ def look_from(data: Mapping[str, Any]) -> Look:
 def look_to(look: Look) -> dict[str, Any]:
     if look.nothing:
         return {"nothing": True}
+    if look.scene:
+        return {"scene": look.scene}
     out: dict[str, Any] = {"lights": {light: target_to(t) for light, t in look.lights.items()}}
     if look.blinds:
         out["blinds"] = dict(look.blinds)
@@ -122,7 +129,6 @@ def look_to(look: Look) -> dict[str, Any]:
 
 
 def room_from(data: Mapping[str, Any]) -> RoomConfig:
-    scaling = data.get("scaling")
     threshold = data.get("threshold_lux", DEFAULT_THRESHOLD_LUX)
     return RoomConfig(
         name=data["name"],
@@ -130,8 +136,8 @@ def room_from(data: Mapping[str, Any]) -> RoomConfig:
         triggers=tuple(data.get("triggers") or ()),
         holds=tuple(data.get("holds") or ()),
         looks={period: look_from(look) for period, look in (data.get("looks") or {}).items()},
+        dim_looks={period: look_from(look) for period, look in (data.get("dim_looks") or {}).items()},
         threshold_lux=None if threshold is None else float(threshold),
-        scaling=Scaling(**scaling) if scaling else None,
         timeout=timedelta(seconds=data.get("timeout_s", DEFAULT_TIMEOUT_S)),
         cooldown=timedelta(seconds=data.get("cooldown_s", DEFAULT_COOLDOWN_S)),
         drift=timedelta(seconds=data.get("drift_s", DEFAULT_DRIFT_S)),
@@ -147,3 +153,25 @@ def first_look(lights: list[str], schedule: Schedule) -> dict[str, Any]:
     Stored on the first period of the day only; the others borrow it.
     """
     return {schedule.order()[0]: {"lights": {light: {"on": True} for light in lights}}}
+
+
+# ---- tracks ------------------------------------------------------------------
+
+
+def tracks_from(options: Mapping[str, Any]) -> TrackSettings:
+    data = options.get("tracks") or {}
+    return TrackSettings(
+        sensor=data.get("sensor") or None,
+        fallback=data.get("fallback") or None,
+        dim_below=float(data.get("dim_below", DEFAULT_DIM_BELOW)),
+        normal_above=float(data.get("normal_above", DEFAULT_NORMAL_ABOVE)),
+    )
+
+
+def tracks_to(settings: TrackSettings) -> dict[str, Any]:
+    return {
+        "sensor": settings.sensor,
+        "fallback": settings.fallback,
+        "dim_below": settings.dim_below,
+        "normal_above": settings.normal_above,
+    }

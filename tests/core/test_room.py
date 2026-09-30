@@ -5,7 +5,6 @@ from datetime import timedelta
 import pytest
 
 from custom_components.room_routines.core.looks import NOTHING, LightTarget, Look, uniform
-from custom_components.room_routines.core.lux import Scaling
 from custom_components.room_routines.core.periods import default_schedule
 from custom_components.room_routines.core.room import (
     ApplyLook,
@@ -217,20 +216,6 @@ def test_power_circuit_goes_on_first_and_never_off():
     off = only(r.tick(at(28, 20, 2)), TurnOff)
     assert power not in off.lights
     assert set(off.lights) == {*bulbs, "light.stairs_handrail"}
-
-
-def test_lux_scaling_dims_the_look():
-    cfg = RoomConfig(
-        "Toilet",
-        (CEILING,),
-        (MOTION,),
-        looks={"Evening": Look({CEILING: LightTarget(True, 100)})},
-        scaling=Scaling(full_dark=5, threshold=50, min_factor=0.3),
-    )
-    r = room(cfg, now=at(28, 18))
-    r.lux(27.5, at(28, 19))
-    d = r.sensor(MOTION, True, at(28, 19, 1))
-    assert only(d, ApplyLook).look.lights[CEILING].brightness_pct == 65.0
 
 
 def test_two_trigger_sensors_share_one_room():

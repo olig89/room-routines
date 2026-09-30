@@ -10,6 +10,14 @@ set_look:
       required: false
       selector:
         text:
+    track:
+      required: false
+      default: normal
+      selector:
+        select:
+          options:
+            - normal
+            - dim
     look:
       required: false
       default: current
@@ -17,5 +25,11 @@ set_look:
         select:
           options:
             - current
+            - scene
             - nothing
             - borrow
+    scene:
+      required: false
+      selector:
+        entity:
+          domain: scene
