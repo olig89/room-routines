@@ -10,7 +10,7 @@ be a Home Assistant scene. A light switched on by hand is left alone, and change
 made by hand are remembered so the page can suggest better looks or times. Each
 room can run in log-only mode first.
 
-**Status: early development (0.3.0).** Install through HACS as a custom repository.
+**Status: early development (0.3.1).** Install through HACS as a custom repository.
 
 ## What you get
 
@@ -42,6 +42,10 @@ room can run in log-only mode first.
   sensor keeps the current day (or uses the backup sensor). A period without a
   Dim look uses its Normal one, and a lit room drifts to the new look when the
   day turns.
+  **Auto-dim** (optional): on a Dim day, a period without a Dim look uses its
+  Normal look turned down (at 50 %, a light at 66 % comes on at 33 %). Lights
+  at their last brightness, and scenes from other apps (the Hue app), can't be
+  dimmed; the page marks those scenes.
 - **Scenes:** any Home Assistant scene can be a look. For scenes made in Home
   Assistant, Room Routines reads the settings, so lights without a native
   transition still drift in steps and the result is recognised as its own; a

@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
-from .looks import Look, LookSource, resolve
+from .looks import Look, LookSource, resolve, scaled
 from .lux import AmbientTracker, dark_enough
 from .periods import Schedule
 from .tracks import NORMAL, TRACK_LABELS
@@ -101,6 +101,9 @@ class ApplyLook:
     look: Look
     power_first: tuple[str, ...] = ()
     transition: timedelta | None = None
+    # Auto-dim still to apply: only for a scene look, whose settings the
+    # integration has to read first (a lights look arrives already scaled).
+    factor: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -158,11 +161,13 @@ class Room:
         ambient: AmbientTracker | None = None,
         stealth: bool = False,
         track: str = NORMAL,
+        auto_dim: float = 1.0,
     ) -> None:
         self.config = config
         self.schedule = schedule
         self.period = period
         self.track = track
+        self.auto_dim = auto_dim  # house-wide: Normal looks at this factor on Dim days
         self.owned_at: datetime | None = None
         self.ambient = ambient or AmbientTracker()
         if lights_on:
@@ -194,9 +199,25 @@ class Room:
     def _look(self) -> Look:
         return self.source().look
 
+    def dim_factor(self) -> float:
+        """Auto-dim for the look in use: on a Dim day, a Normal look is turned down."""
+        if self.track != NORMAL and self.source().track == NORMAL:
+            return self.auto_dim
+        return 1.0
+
+    def _to_apply(self, look: Look) -> tuple[Look, float]:
+        """The look as sent (motion never moves blinds), with auto-dim applied
+        or, for a scene, passed on."""
+        factor = self.dim_factor()
+        if look.scene:
+            return Look(scene=look.scene), factor
+        return scaled(Look(look.lights), factor), 1.0
+
     def _look_name(self) -> str:
         dim = self.source().track != NORMAL
-        return f"{self.period} {'Dim ' if dim else ''}look"
+        factor = self.dim_factor()
+        auto = f" at {round(factor * 100)} %" if factor != 1.0 else ""
+        return f"{self.period} {'Dim ' if dim else ''}look{auto}"
 
     def _power_for(self, look: Look) -> tuple[str, ...]:
         return tuple(sorted({self.config.powered_by[b] for b in look.lit() if b in self.config.powered_by}))
@@ -256,7 +277,7 @@ class Room:
         look = self._look()
         if look.nothing:
             return self._decide(f"motion at {entity}: {self._look_name()} is 'do nothing'")
-        motion_look = Look(look.lights, scene=look.scene)  # motion never moves blinds
+        motion_look, factor = self._to_apply(look)
         self.state = State.OWNED
         self.owned_at = now
         self.deadline = None
@@ -264,7 +285,7 @@ class Room:
         lux = "unknown" if ambient is None else f"{ambient:g} lux"
         return self._decide(
             f"motion at {entity}: {self._look_name()} (ambient {lux})",
-            ApplyLook(motion_look, self._power_for(motion_look)),
+            ApplyLook(motion_look, self._power_for(motion_look), factor=factor),
         )
 
     def _hand_change(self, kind: str, now: datetime) -> HandChange:
@@ -320,8 +341,8 @@ class Room:
         if blinds and self.config.blinds_with_periods and look.blinds:
             actions.append(MoveBlinds(look.blinds))
         if self.state is State.OWNED and not look.nothing:
-            lit = Look(look.lights, scene=look.scene)
-            actions.append(ApplyLook(lit, self._power_for(lit), self.config.drift))
+            lit, factor = self._to_apply(look)
+            actions.append(ApplyLook(lit, self._power_for(lit), self.config.drift, factor))
             reason += f": drifting to the {self._look_name()}"
         return self._decide(reason, *actions)
 

@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pytest
 
-from custom_components.room_routines.core.looks import NOTHING, LightTarget, Look, resolve
+from custom_components.room_routines.core.looks import NOTHING, ON, LightTarget, Look, resolve, scaled
 from custom_components.room_routines.core.periods import default_schedule
 from custom_components.room_routines.core.room import ApplyLook, Room, RoomConfig
 from custom_components.room_routines.core.tracks import DIM, NORMAL, LightLevel, TrackChooser, TrackSettings
@@ -158,3 +158,45 @@ def test_scene_looks_are_passed_on_to_carry_out():
     d = r.sensor("binary_sensor.m", True, at(30, 12))
     [apply] = [a for a in d.actions if isinstance(a, ApplyLook)]
     assert apply.look.scene == "scene.kitchen_day"
+
+
+# ---- auto-dim --------------------------------------------------------------------
+
+
+def test_scaling_turns_set_brightness_down_only():
+    look = Look({"light.a": LightTarget(True, 66, 2700), "light.b": ON, "light.c": LightTarget(False)})
+    half = scaled(look, 0.5)
+    assert half.lights["light.a"] == LightTarget(True, 33, 2700)
+    assert half.lights["light.b"] == ON  # last brightness: no number to halve
+    assert half.lights["light.c"] == LightTarget(False)
+    assert scaled(Look({"light.a": LightTarget(True, 1.5)}), 0.1).lights["light.a"].brightness_pct == 1.0
+    assert scaled(Look(scene="scene.x"), 0.5) == Look(scene="scene.x")
+
+
+def test_dim_day_without_a_dim_look_uses_the_normal_look_turned_down():
+    cfg = RoomConfig("Kitchen", ("light.a",), ("binary_sensor.m",), looks={"Day": DAY}, dim_looks={"Evening": EVENING})
+    r = Room(cfg, default_schedule(), "Day", False, at(30, 12), track=DIM, auto_dim=0.5)
+    d = r.sensor("binary_sensor.m", True, at(30, 12))
+    [apply] = [a for a in d.actions if isinstance(a, ApplyLook)]
+    assert apply.look.lights["light.a"].brightness_pct == 30  # Day's 60 % at 50 %
+    assert "Day look at 50 %" in d.reason
+    # An explicit Dim look is used as it is.
+    r2 = Room(cfg, default_schedule(), "Evening", False, at(30, 18), track=DIM, auto_dim=0.5)
+    [apply2] = [a for a in r2.sensor("binary_sensor.m", True, at(30, 18)).actions if isinstance(a, ApplyLook)]
+    assert apply2.look == EVENING and apply2.factor == 1.0
+    # Normal days are never dimmed.
+    r3 = Room(cfg, default_schedule(), "Day", False, at(30, 12), auto_dim=0.5)
+    [apply3] = [a for a in r3.sensor("binary_sensor.m", True, at(30, 12)).actions if isinstance(a, ApplyLook)]
+    assert apply3.look == DAY
+
+
+def test_auto_dim_for_a_scene_is_passed_on_to_be_read_and_dimmed():
+    cfg = RoomConfig("Kitchen", ("light.a",), ("binary_sensor.m",), looks={"Day": Look(scene="scene.kitchen_day")})
+    r = Room(cfg, default_schedule(), "Day", False, at(30, 12), track=DIM, auto_dim=0.5)
+    [apply] = [a for a in r.sensor("binary_sensor.m", True, at(30, 12)).actions if isinstance(a, ApplyLook)]
+    assert apply.look.scene == "scene.kitchen_day" and apply.factor == 0.5
+
+
+def test_auto_dim_must_be_a_percentage():
+    with pytest.raises(ValueError):
+        TrackSettings(WINDOW, auto_dim_pct=0)

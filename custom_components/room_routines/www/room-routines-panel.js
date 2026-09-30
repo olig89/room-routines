@@ -7,12 +7,14 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.3.0";
+const PANEL_VERSION = "0.3.1";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
 const TRACK_LABEL = { normal: "Normal", dim: "Dim" };
 const TRACK_ICON = { normal: "mdi:weather-sunny", dim: "mdi:weather-cloudy" };
+const HUE_SCENE_NOTE =
+  "This scene comes from another app (such as the Hue app), so Room Routines can turn it on but can't read it: it can't be auto-dimmed on Dim days, lights that can't fade by themselves jump to it instead of moving gradually, and suggestions can't compare with it. A scene saved with Save as now, or made in Home Assistant's scene editor, has none of these limits.";
 const MODE_HELP = {
   off: "Does nothing.",
   log_only: "Works out what it would do and writes it down, but switches nothing. Use it to check a room before it goes live.",
@@ -193,12 +195,24 @@ class RoomRoutinesPanel extends HTMLElement {
     return s ? s.attributes.friendly_name || scene : `${scene} (missing)`;
   }
 
+  // Scenes made in Home Assistant list their entities; ones from other apps (the
+  // Hue app's) don't, and Room Routines can't read their settings.
+  _sceneReadable(scene) {
+    return Array.isArray(this._hass.states[scene]?.attributes?.entity_id);
+  }
+
+  _sceneWarning(scene) {
+    if (!this._hass.states[scene] || this._sceneReadable(scene)) return "";
+    return ` <span class="warntext" title="${esc(HUE_SCENE_NOTE)}"><ha-icon icon="mdi:alert-outline"></ha-icon> from another app</span>`;
+  }
+
   _sceneLink(scene) {
     const id = this._hass.states[scene]?.attributes?.id;
     const name = esc(this._sceneName(scene));
-    return id && this._admin
+    const link = id && this._admin
       ? `<ha-icon icon="mdi:palette"></ha-icon> <a href="/config/scene/edit/${encodeURIComponent(id)}" target="_top" title="Open in Home Assistant's scene editor">${name}</a>`
       : `<ha-icon icon="mdi:palette"></ha-icon> ${name}`;
+    return link + this._sceneWarning(scene);
   }
 
   _lookText(look, lights) {
@@ -369,7 +383,7 @@ class RoomRoutinesPanel extends HTMLElement {
       <div class="meta">${this._luxLine(room)}</div>
       <div class="chips">${this._sensorDots(room)}</div>
       <div class="chips">${this._lightChips(room)}</div>
-      <div class="meta look"><b>${esc(d.house.period)}${room.look_track === "dim" ? " Dim" : ""} look${from}:</b> ${this._lookText(room.current_look, room.settings.lights)}</div>
+      <div class="meta look"><b>${esc(d.house.period)}${room.look_track === "dim" ? " Dim" : ""} look${from}${room.look_factor && room.look_factor < 1 ? ` at ${Math.round(room.look_factor * 100)} %` : ""}:</b> ${this._lookText(room.current_look, room.settings.lights)}</div>
       ${room.suggestions?.length ? `<div class="meta hint"><ha-icon icon="mdi:lightbulb-on-outline"></ha-icon> ${room.suggestions.length === 1 ? "A suggestion" : `${room.suggestions.length} suggestions`} from how the lights get changed</div>` : ""}
     </div>`;
   }
@@ -395,7 +409,12 @@ class RoomRoutinesPanel extends HTMLElement {
         else if (own?.scene) cells = `<td colspan="${lights.length}">${this._sceneLink(own.scene)}</td>`;
         else if (own) cells = lights.map((l) => `<td>${this._target(own.lights?.[l])}</td>`).join("");
         else if (dim) {
-          cells = `<td colspan="${lights.length}" class="muted">${room.looks[p] ? "Uses its Normal look" : `Uses ${esc(this._borrowedFrom(order, room.looks, p) || "—")}'s Normal look`}</td>`;
+          const pct = d.house.tracks?.auto_dim_pct ?? 100;
+          const from = room.looks[p] ? p : this._borrowedFrom(order, room.looks, p);
+          const src = room.looks[p] ? "its Normal look" : `${esc(from || "—")}'s Normal look`;
+          const srcLook = from ? room.looks[from] : null;
+          const note = pct < 100 && srcLook?.scene && !this._sceneReadable(srcLook.scene) ? ` <span class="warntext" title="${esc(HUE_SCENE_NOTE)}">(a scene from another app: not dimmed)</span>` : "";
+          cells = `<td colspan="${lights.length}" class="muted">${pct < 100 ? `Auto-dim: ${src} at ${esc(pct)} %${note}` : `Uses ${src}`}</td>`;
         } else {
           const borrowed = this._borrowedFrom(order, room.looks, p);
           cells = lights.map((l) => `<td class="muted">${borrowed ? `as ${esc(borrowed)}` : "—"}</td>`).join("");
@@ -411,7 +430,7 @@ class RoomRoutinesPanel extends HTMLElement {
       ${Object.entries(TRACK_LABEL).map(([k, v]) => `<button class="subtab ${k === track ? "on" : ""}" data-action="look-track" data-track="${k}"><ha-icon icon="${TRACK_ICON[k]}"></ha-icon> ${v} days</button>`).join("")}
     </div>`;
     const trackHelp = dim
-      ? `<p class="explain">Dim looks are used on dark days${d.house.tracks?.enabled ? ` (the light sensor below ${esc(d.house.tracks.dim_below)} lx)` : ", once a light sensor is chosen under Settings → Dark days"}. A period without a Dim look uses its Normal one, so only set the ones that should differ.</p>`
+      ? `<p class="explain">Dim looks are used on dark days${d.house.tracks?.enabled ? ` (the light sensor below ${esc(d.house.tracks.dim_below)} lx)` : ", once a light sensor is chosen under Settings → Dark days"}. ${(d.house.tracks?.auto_dim_pct ?? 100) < 100 ? `A period without a Dim look uses its Normal one turned down to ${esc(d.house.tracks.auto_dim_pct)} % (auto-dim; lights set to their last brightness stay as they are)` : "A period without a Dim look uses its Normal one"}, so only set the ones that should differ.</p>`
       : `<p class="explain">What the lights do when someone arrives, in each period. A period without its own look uses the one before it. Set the lights how you want them and press <b>Save as now</b>: it becomes a Home Assistant scene you can also use on wall buttons. Or pick a scene you already have, or edit a look by hand.</p>`;
     const s = room.settings;
     return `
@@ -484,8 +503,9 @@ class RoomRoutinesPanel extends HTMLElement {
     const ordered = [...scenes.filter(inArea), ...scenes.filter((e) => !inArea(e))];
     return `<div class="lookeditor">
       <label class="inline">Scene <select data-scene-choice>
-        ${ordered.length ? ordered.map((e) => `<option value="${esc(e)}" ${own?.scene === e ? "selected" : ""}>${esc(this._name(e))}${inArea(e) ? " (in this area)" : ""}</option>`).join("") : `<option value="">No scenes yet</option>`}
+        ${ordered.length ? ordered.map((e) => `<option value="${esc(e)}" ${own?.scene === e ? "selected" : ""}>${esc(this._name(e))}${inArea(e) ? " (in this area)" : ""}${this._sceneReadable(e) ? "" : " ⚠ from another app"}</option>`).join("") : `<option value="">No scenes yet</option>`}
       </select></label>
+      ${ordered.some((e) => !this._sceneReadable(e)) ? `<p class="explain"><ha-icon icon="mdi:alert-outline"></ha-icon> Scenes marked “from another app” (such as the Hue app's) can be turned on, but Room Routines can't read them: they can't be auto-dimmed on Dim days, lights that can't fade by themselves jump to them, and suggestions can't compare with them. Saving the lights with <b>Save as now</b> makes a Home Assistant scene without these limits.</p>` : ""}
       <div class="row">
         <button class="btn primary small" data-action="scene-pick-save" ${ordered.length ? "" : "disabled"}>Use it</button>
         <button class="btn small" data-action="scene-pick-cancel">Cancel</button>
@@ -717,7 +737,7 @@ class RoomRoutinesPanel extends HTMLElement {
       <h2>Dark days</h2>
       <div class="card">
         ${d.house.tracks?.enabled
-          ? `<div>Light sensor: <b>${esc(this._name(d.house.tracks.sensor || d.house.tracks.fallback))}</b>${d.house.tracks.sensor && d.house.tracks.fallback ? `, or <b>${esc(this._name(d.house.tracks.fallback))}</b> when it's unavailable` : ""}. Dim below <b>${esc(d.house.tracks.dim_below)} lx</b>, Normal again above <b>${esc(d.house.tracks.normal_above)} lx</b>. Now: ${d.house.tracks.level == null ? "unknown" : `${esc(d.house.tracks.level)} lx`}, a ${esc(TRACK_LABEL[d.house.track])} day.</div>`
+          ? `<div>Light sensor: <b>${esc(this._name(d.house.tracks.sensor || d.house.tracks.fallback))}</b>${d.house.tracks.sensor && d.house.tracks.fallback ? `, or <b>${esc(this._name(d.house.tracks.fallback))}</b> when it's unavailable` : ""}. Dim below <b>${esc(d.house.tracks.dim_below)} lx</b>, Normal again above <b>${esc(d.house.tracks.normal_above)} lx</b>. Now: ${d.house.tracks.level == null ? "unknown" : `${esc(d.house.tracks.level)} lx`}, a ${esc(TRACK_LABEL[d.house.track])} day. Auto-dim: ${d.house.tracks.auto_dim_pct < 100 ? `<b>${esc(d.house.tracks.auto_dim_pct)} %</b>` : "off"}.</div>`
           : `<div class="meta">Off: every room uses its Normal looks. Choose a light sensor that sees the daylight to use Dim looks on dark days.</div>`}
         <div class="row"><button class="btn small" data-action="edit-tracks">Change</button></div>
       </div>
@@ -806,7 +826,7 @@ class RoomRoutinesPanel extends HTMLElement {
 
   _startTracksDraft(d) {
     const t = d.house.tracks || {};
-    this._tracksDraft = { sensor: t.sensor || null, fallback: t.fallback || null, dim_below: t.dim_below ?? 800, normal_above: t.normal_above ?? 1500 };
+    this._tracksDraft = { sensor: t.sensor || null, fallback: t.fallback || null, dim_below: t.dim_below ?? 800, normal_above: t.normal_above ?? 1500, auto_dim_pct: t.auto_dim_pct ?? 100 };
     this._tracksError = null;
   }
 
@@ -833,6 +853,8 @@ class RoomRoutinesPanel extends HTMLElement {
           <label>Dim below <span class="inputunit"><input type="number" min="0" step="10" value="${esc(t.dim_below)}" data-tracks-field="dim_below"> lx</span></label>
           <label>Normal again above <span class="inputunit"><input type="number" min="0" step="10" value="${esc(t.normal_above)}" data-tracks-field="normal_above"> lx</span>
             <span class="help">Higher than Dim, so the day doesn't flip back and forth around one level.</span></label>
+          <label>Auto-dim: periods without a Dim look use their Normal look at <span class="inputunit"><input type="number" min="1" max="100" step="5" value="${esc(t.auto_dim_pct)}" data-tracks-field="auto_dim_pct"> %</span>
+            <span class="help">100 turns it off. A light at 66 % with auto-dim at 50 % comes on at 33 %. Colours stay; lights set to their last brightness, and scenes from other apps (such as the Hue app), can't be dimmed.</span></label>
         </div>
         <div class="row">
           <button class="btn primary" data-action="tracks-save">Save</button>
@@ -1160,7 +1182,7 @@ class RoomRoutinesPanel extends HTMLElement {
       case "tracks-save": {
         const t = this._tracksDraft;
         const res = await this._ws(
-          { type: "room_routines/save_tracks", sensor: t.sensor, fallback: t.fallback, dim_below: t.dim_below ?? 800, normal_above: t.normal_above ?? 1500 },
+          { type: "room_routines/save_tracks", sensor: t.sensor, fallback: t.fallback, dim_below: t.dim_below ?? 800, normal_above: t.normal_above ?? 1500, auto_dim_pct: t.auto_dim_pct ?? 100 },
           t.sensor || t.fallback ? "Saved the dark-day settings." : "Dark days are off."
         );
         if (!res.ok) {

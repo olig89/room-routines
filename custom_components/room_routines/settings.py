@@ -196,6 +196,7 @@ def set_tracks(options: Mapping[str, Any], data: Mapping[str, Any]) -> dict[str,
         "fallback": data.get("fallback") or None,
         "dim_below": data.get("dim_below", 800),
         "normal_above": data.get("normal_above", 1500),
+        "auto_dim_pct": data.get("auto_dim_pct", 100),
     }
     try:
         settings = tracks_from({CONF_TRACKS: row})

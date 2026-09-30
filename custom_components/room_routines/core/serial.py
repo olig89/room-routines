@@ -5,7 +5,7 @@ The config entry's options hold plain JSON:
     {
       "periods": [{"name": "Overnight", "start": "23:00", "alt_start": null}, ...],
       "alt_days": [5, 6],
-      "tracks": {"sensor": "sensor.window_lux", "fallback": null, "dim_below": 800, "normal_above": 1500},
+      "tracks": {"sensor": "sensor.window_lux", "fallback": null, "dim_below": 800, "normal_above": 1500, "auto_dim_pct": 50},
       "rooms": {
         "<room id>": {
           "name": "Downstairs Toilet",
@@ -36,7 +36,7 @@ from typing import Any
 from .looks import NOTHING, LightTarget, Look
 from .periods import Period, Schedule, default_schedule
 from .room import RoomConfig
-from .tracks import DEFAULT_DIM_BELOW, DEFAULT_NORMAL_ABOVE, TrackSettings
+from .tracks import DEFAULT_AUTO_DIM_PCT, DEFAULT_DIM_BELOW, DEFAULT_NORMAL_ABOVE, TrackSettings
 
 DEFAULT_THRESHOLD_LUX = 50.0
 DEFAULT_TIMEOUT_S = 30
@@ -165,6 +165,7 @@ def tracks_from(options: Mapping[str, Any]) -> TrackSettings:
         fallback=data.get("fallback") or None,
         dim_below=float(data.get("dim_below", DEFAULT_DIM_BELOW)),
         normal_above=float(data.get("normal_above", DEFAULT_NORMAL_ABOVE)),
+        auto_dim_pct=float(data.get("auto_dim_pct", DEFAULT_AUTO_DIM_PCT)),
     )
 
 
@@ -174,4 +175,5 @@ def tracks_to(settings: TrackSettings) -> dict[str, Any]:
         "fallback": settings.fallback,
         "dim_below": settings.dim_below,
         "normal_above": settings.normal_above,
+        "auto_dim_pct": settings.auto_dim_pct,
     }

@@ -57,7 +57,7 @@ from homeassistant.util import dt as dt_util
 from .const import ANY_SIGNAL, DOMAIN, MODE_LIVE, MODE_LOG_ONLY, MODE_OFF, house_signal, room_signal
 from .core.fade import plan_fade
 from .core.habits import Change, Suggestion, change_from, change_to, suggest
-from .core.looks import OFF, LightTarget, Look, resolve
+from .core.looks import OFF, LightTarget, Look, resolve, scaled
 from .core.matching import Command, OwnChangeMatcher
 from .core.periods import Schedule
 from .core.room import (
@@ -127,6 +127,7 @@ class RoomRunner:
         # at the dimmed level the fade left it at.
         self._before_fade: dict[str, float] = {}
         self._pending_change: CALLBACK_TYPE | None = None
+        self._warned_scenes: set[str] = set()
 
     # -- life cycle --
 
@@ -165,7 +166,7 @@ class RoomRunner:
         lights_on = self.mode == MODE_LIVE and self._any_on()
         self.room = Room(
             self.config, self.house.schedule, self.house.period, lights_on, now,
-            stealth=self.house.stealth, track=self.house.track,
+            stealth=self.house.stealth, track=self.house.track, auto_dim=self.house.tracks.auto_dim,
         )
         for sensor in (*self.config.triggers, *self.config.holds):
             state = self.hass.states.get(sensor)
@@ -339,10 +340,15 @@ class RoomRunner:
 
     def look_of(self, period: str, track: str) -> Look | None:
         """A period's look as lights, for comparing with hand changes (None if unreadable)."""
-        look = resolve(period, track, self.config.looks, self.config.dim_looks, self.house.schedule).look
+        source = resolve(period, track, self.config.looks, self.config.dim_looks, self.house.schedule)
+        look = source.look
         if look.scene:
             lights = scene_lights(self.hass, look.scene, self.config.switchable())
-            return None if lights is None else Look(lights)
+            if lights is None:
+                return None
+            look = Look(lights)
+        if track != source.track:
+            look = scaled(look, self.house.tracks.auto_dim)
         return look
 
     def _notify(self) -> None:
@@ -422,6 +428,18 @@ class RoomRunner:
             return
         lights = scene_lights(self.hass, scene, self.config.switchable())
         transition = action.transition
+        if action.factor != 1.0:
+            if lights:
+                # Auto-dim: send the scene's lights turned down, light by light.
+                await self._apply(ApplyLook(scaled(Look(lights), action.factor), action.power_first, transition))
+                return
+            if scene not in self._warned_scenes:
+                self._warned_scenes.add(scene)
+                _LOGGER.warning(
+                    "%s: %s can't be read (a scene from another app, such as the Hue app), "
+                    "so it is turned on as it is, not auto-dimmed",
+                    self.config.name, scene,
+                )
         if lights and transition and any(self._how_to_fade(l, transition) == "steps" for l in lights):
             # Some lights can't fade themselves: do the drift from the scene's
             # settings, light by light, as for any other look.

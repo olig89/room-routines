@@ -27,7 +27,7 @@ async def evening(hass: HomeAssistant, tallinn, freezer):
     freezer.move_to(MONDAY_EVENING)
 
 
-async def start(hass: HomeAssistant, window: str | None = "300", mode: str = "live", tracks=True, **room_over):
+async def start(hass: HomeAssistant, window: str | None = "300", mode: str = "live", tracks=True, auto_dim=100, **room_over):
     hass.states.async_set(CEILING, "off")
     hass.states.async_set(MOTION, "off")
     hass.states.async_set(LUX, "8")
@@ -35,7 +35,7 @@ async def start(hass: HomeAssistant, window: str | None = "300", mode: str = "li
         hass.states.async_set(WINDOW, window)
     opts = options(**room_over)
     if tracks:
-        opts["tracks"] = {"sensor": WINDOW, "fallback": None, "dim_below": 800, "normal_above": 1500}
+        opts["tracks"] = {"sensor": WINDOW, "fallback": None, "dim_below": 800, "normal_above": 1500, "auto_dim_pct": auto_dim}
     entry = MockConfigEntry(domain=DOMAIN, title="Room Routines", data={}, options=opts)
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -229,3 +229,30 @@ async def test_saving_the_dark_day_sensor_is_for_admins(hass, lights, hass_ws_cl
     await ws.send_json({"id": 2, "type": "room_routines/save_tracks", "sensor": WINDOW, "dim_below": 900, "normal_above": 900})
     reply = await ws.receive_json()
     assert not reply["success"] and reply["error"]["code"] == "invalid_tracks"
+
+
+# ---- auto-dim ----------------------------------------------------------------------
+
+
+async def test_auto_dim_reads_a_home_assistant_scene_and_turns_it_down(hass, lights):
+    await scenes(hass, brightness=200)  # 78.4 %
+    await start(hass, auto_dim=50, looks={"Evening": {"scene": SCENE}})
+    await motion(hass, True)
+    await hass.async_block_till_done()
+    assert lights.of("turn_on")[-1] == {"entity_id": CEILING, "brightness_pct": 39.2}
+    assert "Evening look at 50 %" in hass.states.get(STATUS).attributes["reason"]
+
+
+async def test_a_scene_from_another_app_is_turned_on_as_it_is(hass, lights, caplog):
+    calls = []
+
+    async def turn_on(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("scene", "turn_on", turn_on)
+    hass.states.async_set("scene.hue_relax", "unknown", {"friendly_name": "Relax", "group_name": "WC"})
+    await start(hass, auto_dim=50, looks={"Evening": {"scene": "scene.hue_relax"}})
+    await motion(hass, True)
+    await hass.async_block_till_done()
+    assert calls == [{"entity_id": "scene.hue_relax"}]
+    assert "can't be read" in caplog.text

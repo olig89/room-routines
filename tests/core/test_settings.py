@@ -124,7 +124,10 @@ def test_removing_a_light_drops_it_from_dim_looks_too():
 
 def test_dark_day_settings():
     options = set_tracks(base(), {"sensor": "sensor.window", "dim_below": 600, "normal_above": 1200})
-    assert options["tracks"] == {"sensor": "sensor.window", "fallback": None, "dim_below": 600.0, "normal_above": 1200.0}
+    assert options["tracks"] == {
+        "sensor": "sensor.window", "fallback": None, "dim_below": 600.0, "normal_above": 1200.0, "auto_dim_pct": 100.0,
+    }
+    assert set_tracks(base(), {"sensor": "sensor.window", "auto_dim_pct": 50})["tracks"]["auto_dim_pct"] == 50.0
     assert "stray" not in options
     with pytest.raises(SettingsError):
         set_tracks(base(), {"sensor": "sensor.window", "dim_below": 900, "normal_above": 900})

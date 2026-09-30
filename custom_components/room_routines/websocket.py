@@ -128,6 +128,7 @@ def room_snapshot(hass: HomeAssistant, runner: RoomRunner) -> dict[str, Any]:
         "stealth": room.stealth if room else house.stealth,
         "look_period": source.period if source else None,
         "look_track": source.track if source else NORMAL,
+        "look_factor": room.dim_factor() if room else 1.0,
         "current_look": look_to(source.look) if source else None,
         # What is stored, so the settings page edits exactly that.
         "settings": {
@@ -441,6 +442,7 @@ def ws_save_periods(hass: HomeAssistant, connection: websocket_api.ActiveConnect
         vol.Optional("fallback"): vol.Any(None, str),
         vol.Optional("dim_below", default=800): vol.All(vol.Coerce(float), vol.Range(min=0, max=200000)),
         vol.Optional("normal_above", default=1500): vol.All(vol.Coerce(float), vol.Range(min=0, max=200000)),
+        vol.Optional("auto_dim_pct", default=100): vol.All(vol.Coerce(float), vol.Range(min=1, max=100)),
     }
 )
 @websocket_api.require_admin

@@ -12,6 +12,10 @@ two thresholds (Dim below ``dim_below``, back to Normal above ``normal_above``)
 and only once the current track has held for ``min_hold``, so passing clouds
 don't flip it back and forth.
 
+Auto-dim: on a Dim day, a period without a Dim look can use its Normal look
+with every set brightness at ``auto_dim_pct`` percent (50: a light at 66 % comes
+on at 33 %). 100 turns it off. Explicit Dim looks always win.
+
 A sensor that is unavailable, or hasn't reported yet, changes nothing: the
 current track stays. (A room that falls to Dim every time a battery dies would
 be worse than one that stays Normal a little too long.)
@@ -29,6 +33,7 @@ TRACK_LABELS = {NORMAL: "Normal", DIM: "Dim"}
 
 DEFAULT_DIM_BELOW = 800.0
 DEFAULT_NORMAL_ABOVE = 1500.0
+DEFAULT_AUTO_DIM_PCT = 100.0
 
 
 @dataclass(frozen=True)
@@ -37,12 +42,20 @@ class TrackSettings:
     fallback: str | None = None
     dim_below: float = DEFAULT_DIM_BELOW
     normal_above: float = DEFAULT_NORMAL_ABOVE
+    auto_dim_pct: float = DEFAULT_AUTO_DIM_PCT
     window: timedelta = timedelta(minutes=15)
     min_hold: timedelta = timedelta(minutes=20)
 
     def __post_init__(self) -> None:
         if not self.dim_below < self.normal_above:
             raise ValueError("dim_below must be lower than normal_above")
+        if not 1 <= self.auto_dim_pct <= 100:
+            raise ValueError("auto_dim_pct must be between 1 and 100")
+
+    @property
+    def auto_dim(self) -> float:
+        """Auto-dim as a factor (1.0 = off)."""
+        return self.auto_dim_pct / 100
 
     @property
     def enabled(self) -> bool:
