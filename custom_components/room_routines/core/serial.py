@@ -23,6 +23,10 @@ The config entry's options hold plain JSON:
           "period_starts": {"Evening": "18:00"},
           "timers": [{"at": "08:30", "action": "on", "days": "workdays", "only_dark": true,
                       "only_home": ["person.x"]}, ...],
+          "starters": [{"entity": "binary_sensor.pc", "state": "on"}, ...],
+          "only_when": [{"entity": "binary_sensor.baby_bedtime", "state": "on", "negate": true}, ...],
+          "rules": [{"when": {"entity": "...", "state": "on"}, "action": "nothing" | "look" | "cap",
+                     "scene": "scene.x" | "period": "Overnight", "max_pct": 20}, ...],
           "looks": {"<period>": {"nothing": true} | {"scene": "scene.x"} | {"lights": {...}, "blinds": {...}}},
           "dim_looks": {"<period>": ...}   (same form; the Dark Day track)
         }
@@ -30,6 +34,8 @@ The config entry's options hold plain JSON:
     }
 
 "hidden_areas": [area ids] lists areas the user doesn't want as rooms.
+
+"house_rules": [rules as above, each with "rooms": [room ids] (none = every room)].
 
 No "tracks" (or "on" false) means every day is a Normal day.
 
@@ -46,6 +52,7 @@ from typing import Any
 from .looks import NOTHING, LightTarget, Look
 from .periods import Period, Schedule, default_schedule
 from .room import RoomConfig
+from .rules import condition_from, rule_from
 from .timers import timer_from
 from .tracks import DEFAULT_BRIGHTNESS_PCT, DEFAULT_DARK_BELOW, DEFAULT_NORMAL_ABOVE, WEATHER, TrackSettings
 
@@ -159,6 +166,9 @@ def room_from(data: Mapping[str, Any]) -> RoomConfig:
         blends={str(p): float(m) for p, m in (data.get("blends") or {}).items() if m},
         period_starts={str(p): _time(t) for p, t in (data.get("period_starts") or {}).items() if t},
         timers=tuple(timer_from(t) for t in data.get("timers") or ()),
+        starters=tuple(condition_from(c) for c in data.get("starters") or ()),
+        only_when=tuple(condition_from(c) for c in data.get("only_when") or ()),
+        rules=tuple(rule_from(r) for r in data.get("rules") or ()),
     )
 
 

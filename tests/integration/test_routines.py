@@ -134,3 +134,55 @@ async def test_a_dark_only_timer_waits_for_the_dark(hass, lights, freezer):
     assert not lights.of("turn_on")
     await at(hass, freezer, "2026-09-28 18:00:01+00:00")  # 21:00: dark
     assert lights.of("turn_on")[-1]["brightness_pct"] == 5
+
+
+PC = "binary_sensor.office_pc"
+BEDTIME = "binary_sensor.baby_bedtime"
+
+
+async def test_a_starter_starts_the_routine_when_it_turns_on(hass, lights, freezer):
+    hass.states.async_set(PC, "off")
+    await setup(hass, starters=[{"entity": PC, "state": "on"}])
+    hass.states.async_set(PC, "on")
+    await hass.async_block_till_done()
+    assert lights.of("turn_on")[-1]["brightness_pct"] == 40
+    assert "is on" in hass.states.get(STATUS).attributes["reason"]
+    # Staying on, or going off, does nothing more.
+    sent = len(lights.calls)
+    hass.states.async_set(PC, "on", {"x": 1})
+    hass.states.async_set(PC, "off")
+    await hass.async_block_till_done()
+    assert len(lights.calls) == sent
+
+
+async def test_only_when_holds_back_a_timer(hass, lights, freezer):
+    hass.states.async_set(BEDTIME, "on")
+    await setup(hass, timers=[{"at": "10:30", "action": "on"}],
+                only_when=[{"entity": BEDTIME, "state": "on", "negate": True}])
+    await at(hass, freezer, "2026-09-28 07:30:01+00:00")
+    assert not lights.of("turn_on")
+    assert "only when" in hass.states.get(STATUS).attributes["reason"]
+
+
+async def test_a_house_rule_dims_a_lit_room_and_lets_go_after(hass, lights, freezer):
+    hass.states.async_set(BEDTIME, "off")
+    options = office()
+    options["house_rules"] = [{"when": {"entity": BEDTIME, "state": "on"}, "action": "cap", "max_pct": 10}]
+    hass.states.async_set(PLAY, "off", {"supported_features": LightEntityFeature.TRANSITION})
+    entry = MockConfigEntry(domain=DOMAIN, title="Room Routines", data={}, options=options)
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    await hass.services.async_call(
+        "select", "select_option", {"entity_id": "select.office_routine_mode", "option": "live"}, blocking=True
+    )
+    await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
+    await hass.async_block_till_done()
+    assert lights.of("turn_on")[-1]["brightness_pct"] == 40
+    hass.states.async_set(BEDTIME, "on")
+    await hass.async_block_till_done()
+    assert lights.of("turn_on")[-1]["brightness_pct"] == 10
+    assert "no brighter than 10 %" in hass.states.get(STATUS).attributes["reason"]
+    hass.states.async_set(BEDTIME, "off")
+    await hass.async_block_till_done()
+    assert lights.of("turn_on")[-1]["brightness_pct"] == 40

@@ -9,7 +9,7 @@ States:
 
 - **idle**: lights off (as far as the room knows). Motion may switch them on.
 - **owned**: the routine is running: the room switched the lights on (motion,
-  a timer, a button calling ``start``) and follows the day with them. With
+  a timer, a starter, the switch_on action) and follows the day with them. With
   sensors it switches them off once the room has been empty for the timeout;
   a room without sensors keeps them on until someone (or a timer) switches
   them off.
@@ -25,6 +25,12 @@ lights by hand, the room stops following until the lights are switched off.
 A room can have its own start times for some periods (``period_starts``: an
 office whose evening starts after the working day), and timers that start or
 stop the routine at set times (see ``timers``).
+
+What else it listens to (see ``rules``): *starters* (start the routine when an
+entity becomes, say, "on"), *only when* conditions that every way of starting
+must meet, and *rules* that change how the room behaves while something holds
+(do nothing, use another look, keep below a brightness). The integration works
+out which hold and tells the room with ``set_context``.
 
 After someone switches the room's lights off by hand, motion is ignored for
 the cooldown, so a person can leave a room in the dark.
@@ -69,6 +75,7 @@ from .blend import blend, blendable, fraction
 from .looks import LightTarget, Look, LookSource, resolve, scaled
 from .lux import AmbientTracker, dark_enough
 from .periods import Schedule
+from .rules import CAP, LOOK, NOTHING, Condition, Rule
 from .timers import Timer
 from .tracks import NORMAL, TRACK_LABELS
 
@@ -109,6 +116,12 @@ class RoomConfig:
     # The room's own start times for some periods: {period: time}. The house's otherwise.
     period_starts: Mapping[str, time] = field(default_factory=dict)
     timers: tuple[Timer, ...] = ()
+    # Start the routine when one of these becomes true.
+    starters: tuple[Condition, ...] = ()
+    # Every start needs all of these.
+    only_when: tuple[Condition, ...] = ()
+    # The room's own "while X" rules (the house's come with the context).
+    rules: tuple[Rule, ...] = ()
 
     def __post_init__(self) -> None:
         overlap = set(self.triggers) & set(self.holds)
@@ -225,6 +238,11 @@ class Room:
         # Lights switched on by hand in a ROUTINE room: taken over at this time.
         self.adopt_at: datetime | None = None
         self._last_blend: Look | None = None
+        # From the integration (``set_context``): the rule in force, and why
+        # starting isn't allowed right now (an "only when" not met).
+        self.rule: Rule | None = None
+        self.rule_text = ""
+        self.unmet_text = ""
         self.last = Decision(reason="manual: lights were on at start" if lights_on else "idle")
 
     # -- helpers --
@@ -240,7 +258,40 @@ class Room:
         return self.state is State.OWNED and self._any(self.config.holds)
 
     def source(self) -> LookSource:
+        rule = self.rule
+        if rule is not None and rule.action == LOOK:
+            if rule.scene:
+                return LookSource(Look(scene=rule.scene), self.period, self.track)
+            return resolve(rule.period or self.period, self.track, self.config.looks, self.config.dim_looks, self.schedule)
         return resolve(self.period, self.track, self.config.looks, self.config.dim_looks, self.schedule)
+
+    def _cap(self, look: Look, factor: float) -> tuple[Look, float]:
+        """Keep every light at or below a "no brighter than" rule's level. A light
+        at its last brightness gets the level itself (there is no number to compare)."""
+        rule = self.rule
+        if rule is None or rule.action != CAP or look.nothing:
+            return look, factor
+        if look.scene:
+            lights = self.scene_reader(look.scene) if self.scene_reader else None
+            if lights is None:
+                return look, factor  # can't read it: turned on as it is
+            look = scaled(Look(dict(lights)), factor)
+            factor = 1.0
+        cap = float(rule.max_pct or 100)
+        lights = {}
+        for light, target in look.lights.items():
+            if target.on and (target.brightness_pct is None or target.brightness_pct > cap):
+                target = LightTarget(True, cap, target.color_temp_kelvin, target.rgb)
+            lights[light] = target
+        return Look(lights, look.blinds), factor
+
+    def refusal(self) -> str | None:
+        """Why the room may not start now, or None."""
+        if self.rule is not None and self.rule.action == NOTHING:
+            return self.rule_text or "a rule says do nothing"
+        if self.unmet_text:
+            return f"only when {self.unmet_text}"
+        return None
 
     def _look(self) -> Look:
         return self.source().look
@@ -278,7 +329,7 @@ class Room:
     def blending(self, now: datetime) -> tuple[float, str, Look] | None:
         """(fraction, next period, blended look) while the room is blending, else None."""
         minutes = self.config.blends.get(self.period, 0)
-        if not minutes:
+        if not minutes or (self.rule is not None and self.rule.action == LOOK):
             return None
         at = self.schedule.current(now)
         if at.name != self.period:
@@ -299,15 +350,25 @@ class Room:
         b = self.blending(now)
         if b is not None:
             f, nxt, look = b
-            return look, 1.0, f"{self.period} look, blending into {nxt} ({round(f * 100)} %)"
+            look, _ = self._cap(look, 1.0)
+            return look, 1.0, f"{self.period} look, blending into {nxt} ({round(f * 100)} %){self._rule_tail()}"
         look, factor = self._to_apply(self._look())
+        look, factor = self._cap(look, factor)
         return look, factor, self._look_name()
 
+    def _rule_tail(self) -> str:
+        return f" ({self.rule_text})" if self.rule is not None and self.rule.action != NOTHING else ""
+
     def _look_name(self) -> str:
-        dim = self.source().track != NORMAL
+        rule = self.rule
+        if rule is not None and rule.action == LOOK and rule.scene:
+            return f"scene {rule.scene}{self._rule_tail()}"
+        source = self.source()
+        dim = source.track != NORMAL
         factor = self.dim_factor()
         auto = f" at {round(factor * 100)} %" if factor != 1.0 else ""
-        return f"{self.period} look{' for Dark Days' if dim else ''}{auto}"
+        period = source.period if rule is not None and rule.action == LOOK and source.period else self.period
+        return f"{period} look{' for Dark Days' if dim else ''}{auto}{self._rule_tail()}"
 
     def _power_for(self, look: Look) -> tuple[str, ...]:
         return tuple(sorted({self.config.powered_by[b] for b in look.lit() if b in self.config.powered_by}))
@@ -373,6 +434,9 @@ class Room:
         )
 
     def _switch_on(self, entity: str, now: datetime) -> Decision:
+        refused = self.refusal()
+        if refused:
+            return self._decide(f"motion at {entity}, but {refused}")
         if self.cooldown_until is not None and now < self.cooldown_until:
             return self._decide("motion ignored: lights were just switched off by hand")
         ambient = self.ambient.ambient(now)
@@ -394,6 +458,9 @@ class Room:
     def start(self, now: datetime, why: str) -> Decision:
         """Start the routine (a timer, a button, the switch_on action): the current
         look, then following the day, whatever the lights were doing."""
+        refused = self.refusal()
+        if refused:
+            return self._decide(f"{why}, but {refused}")
         if self._look().nothing:
             return self._decide(f"{why}: {self._look_name()} is 'do nothing'")
         look, factor, name = self._target(now)
@@ -479,6 +546,30 @@ class Room:
                 reason += f": drifting to the {name}"
         return self._decide(reason, *actions)
 
+    def set_context(
+        self, rule: Rule | None, rule_text: str, unmet_text: str, now: datetime
+    ) -> Decision:
+        """The rule in force and any unmet "only when", worked out by the integration
+        from the house's states. A lit room moves to a changed look; an idle room
+        whose start was refused switches on if a trigger still sees someone."""
+        was_rule, was_text, was_refused = self.rule, self.rule_text, self.refusal()
+        self.rule, self.rule_text, self.unmet_text = rule, rule_text if rule else "", unmet_text
+        refused = self.refusal()
+        if rule != was_rule:
+            reason = rule_text if rule is not None else f"over: {was_text}"
+            if self.state is State.OWNED:
+                return self._restyle(reason, blinds=False, now=now)
+            if self.state is State.IDLE and was_refused and not refused:
+                seen = [t for t in self.config.triggers if self.sensors.get(t, False)]
+                if seen and not self.stealth:
+                    return self._switch_on(seen[0], now)
+            return self._decide(f"{reason}: {self.state.value}")
+        if self.state is State.IDLE and was_refused and not refused and not self.stealth:
+            seen = [t for t in self.config.triggers if self.sensors.get(t, False)]
+            if seen:
+                return self._switch_on(seen[0], now)
+        return self._unchanged()
+
     def blend_tick(self, now: datetime) -> Decision:
         """Move a lit, blending room one step on (called every ``BLEND_STEP``)."""
         if self.state is not State.OWNED or self.paused:
@@ -487,11 +578,12 @@ class Room:
         if b is None:
             return self._unchanged()
         f, nxt, look = b
+        look, _ = self._cap(look, 1.0)
         if look == self._last_blend:
             return self._unchanged()
         self._last_blend = look
         return self._decide(
-            f"{self.period} look, blending into {nxt} ({round(f * 100)} %)",
+            f"{self.period} look, blending into {nxt} ({round(f * 100)} %){self._rule_tail()}",
             ApplyLook(look, self._power_for(look), BLEND_STEP),
         )
 

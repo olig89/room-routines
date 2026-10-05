@@ -9,6 +9,7 @@ from custom_components.room_routines.settings import (
     add_area_rooms,
     add_room,
     remove_room,
+    set_house_rules,
     set_look,
     set_periods,
     set_tracks,
@@ -199,3 +200,43 @@ def test_old_lux_settings_carry_over():
     assert t.on and t.weather and t.sensor == "sensor.window"
     assert (t.dark_below, t.normal_above, t.brightness_pct) == (40, 55, 60)
     assert not tracks_from({}).on
+
+
+BEDTIME = {"entity": "binary_sensor.baby_bedtime", "state": "on"}
+
+
+def test_a_room_keeps_its_starters_conditions_and_rules():
+    data = {
+        **ROOM,
+        "starters": [{"entity": "binary_sensor.pc", "state": "on"}],
+        "only_when": [{**BEDTIME, "negate": True}],
+        "rules": [{"when": BEDTIME, "action": "look", "period": "Overnight"}],
+    }
+    options, room_id = add_room(base(), data)
+    room = options["rooms"][room_id]
+    assert room["starters"] == [{"entity": "binary_sensor.pc", "state": "on"}]
+    assert room["only_when"] == [{**BEDTIME, "negate": True}]
+    assert room["rules"] == [{"when": BEDTIME, "action": "look", "period": "Overnight"}]
+    with pytest.raises(SettingsError) as err:
+        add_room(base(), {**ROOM, "rules": [{"when": BEDTIME, "action": "cap"}]})
+    assert err.value.key == "invalid_rules"
+
+
+def test_house_rules_name_real_rooms_and_follow_removals_and_renames():
+    options, a = add_room(base(), ROOM)
+    options, b = add_room(options, {**ROOM, "name": "Landing", "area_id": "landing"})
+    options = set_house_rules(options, [
+        {"when": BEDTIME, "action": "look", "period": "Overnight", "rooms": [a]},
+        {"when": {"entity": "zone.home", "state": "0"}, "action": "nothing"},
+    ])
+    assert options["house_rules"][0]["rooms"] == [a]
+    with pytest.raises(SettingsError):
+        set_house_rules(options, [{"when": BEDTIME, "action": "nothing", "rooms": ["nope"]}])
+    renamed = set_periods(
+        options, [{"name": "Night" if r["name"] == "Overnight" else r["name"], "start": r["start"]} for r in options["periods"]],
+        [], {"Overnight": "Night"},
+    )
+    assert renamed["house_rules"][0]["period"] == "Night"
+    removed = remove_room(options, a)
+    # the rule was only for the removed room: gone, not widened to every room
+    assert removed["house_rules"] == [{"when": {"entity": "zone.home", "state": "0"}, "action": "nothing"}]

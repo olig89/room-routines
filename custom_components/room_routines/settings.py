@@ -11,7 +11,8 @@ import uuid
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from .const import CONF_ALT_DAYS, CONF_HIDDEN_AREAS, CONF_PERIODS, CONF_ROOMS, CONF_TRACKS, clean_options
+from .const import CONF_ALT_DAYS, CONF_HIDDEN_AREAS, CONF_HOUSE_RULES, CONF_PERIODS, CONF_ROOMS, CONF_TRACKS, clean_options
+from .core.rules import condition_from, condition_to, rule_from, rule_to
 from .core.serial import first_look, look_from, look_to, room_from, schedule_from, tracks_from, tracks_to
 from .core.tracks import DIM, NORMAL, TRACKS
 
@@ -69,6 +70,15 @@ def clean_room(user_input: Mapping[str, Any], previous: Mapping[str, Any] | None
         str(p): str(t)[:5] for p, t in (user_input.get("period_starts", room.get("period_starts")) or {}).items() if t
     }
     room["timers"] = [dict(t) for t in user_input.get("timers", room.get("timers")) or []]
+    try:
+        for key in ("starters", "only_when"):
+            room[key] = [condition_to(condition_from(c)) for c in user_input.get(key, room.get(key)) or []]
+        room["rules"] = [
+            rule_to(rule_from({k: v for k, v in r.items() if k != "rooms"}))
+            for r in user_input.get("rules", room.get("rules")) or []
+        ]
+    except (ValueError, KeyError, TypeError) as err:
+        raise SettingsError("invalid_rules") from err
     if not room["name"]:
         raise SettingsError("no_name")
     # A room needs lights; sensors are optional (a room can run on timers, buttons
@@ -120,6 +130,13 @@ def remove_room(options: Mapping[str, Any], room_id: str) -> dict[str, Any]:
     out = _options(options)
     area_id = _room(out, room_id).get("area_id")
     del out[CONF_ROOMS][room_id]
+    for rule in out.get(CONF_HOUSE_RULES) or []:
+        if rule.get("rooms") and room_id in rule["rooms"]:
+            rule["rooms"] = [r for r in rule["rooms"] if r != room_id]
+    # a rule left with no rooms would cover every room: drop it instead
+    out[CONF_HOUSE_RULES] = [
+        r for r in out.get(CONF_HOUSE_RULES) or [] if "rooms" not in r or r["rooms"]
+    ]
     # A room made from an area would come straight back: hide the area instead.
     if area_id and not any(r.get("area_id") == area_id for r in out[CONF_ROOMS].values()):
         hidden = set(out.get(CONF_HIDDEN_AREAS) or [])
@@ -161,6 +178,23 @@ def add_area_rooms(options: Mapping[str, Any], areas: Mapping[str, tuple[str, li
         out[CONF_ROOMS][f"area_{area_id}"] = room
         added = True
     return out if added else None
+
+
+def set_house_rules(options: Mapping[str, Any], rules: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """The house's "while X" rules, each for chosen rooms (none = every room)."""
+    out = _options(options)
+    known = set(out[CONF_ROOMS])
+    try:
+        cleaned = []
+        for data in rules:
+            rule = rule_from(data)
+            if any(r not in known for r in rule.rooms):
+                raise SettingsError("unknown_room")
+            cleaned.append(rule_to(rule))
+    except (ValueError, KeyError, TypeError) as err:
+        raise SettingsError("invalid_rules") from err
+    out[CONF_HOUSE_RULES] = cleaned
+    return out
 
 
 # ---- periods -------------------------------------------------------------------
@@ -218,6 +252,23 @@ def set_periods(
                     if target and target in names:
                         moved[target] = value
                 room[key] = moved
+    # A rule using another period's look follows a rename (a removed period: the rule goes).
+    def _moved_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        kept = []
+        for rule in rules:
+            if rule.get("period"):
+                target = renames.get(rule["period"], rule["period"])
+                if not target or target not in names:
+                    continue
+                rule = {**rule, "period": target}
+            kept.append(rule)
+        return kept
+
+    for room in out[CONF_ROOMS].values():
+        if room.get("rules"):
+            room["rules"] = _moved_rules(room["rules"])
+    if out.get(CONF_HOUSE_RULES):
+        out[CONF_HOUSE_RULES] = _moved_rules(out[CONF_HOUSE_RULES])
     tracks = out.get(CONF_TRACKS)
     if tracks and tracks.get("periods") is not None:
         # The Dark Day periods follow renames too (a removed one drops out).

@@ -41,6 +41,7 @@ from .settings import (
     add_room,
     remove_room,
     set_look,
+    set_house_rules,
     set_periods,
     set_tracks,
     unhide_area,
@@ -59,6 +60,7 @@ def async_register_websocket(hass: HomeAssistant) -> None:
         ws_remove_room,
         ws_save_periods,
         ws_save_tracks,
+        ws_save_house_rules,
         ws_scene_draft,
         ws_dismiss,
         ws_history,
@@ -146,6 +148,7 @@ def room_snapshot(hass: HomeAssistant, runner: RoomRunner) -> dict[str, Any]:
         "own_times": bool(runner.config.period_starts),
         "has_sensors": runner.config.has_sensors,
         "paused": room.paused if room else False,
+        **runner.context_status(),
         "blending": (
             {"fraction": round(blending[0], 3), "into": blending[1]} if blending else None
         ),
@@ -165,6 +168,9 @@ def room_snapshot(hass: HomeAssistant, runner: RoomRunner) -> dict[str, Any]:
             "blends": dict(stored.get("blends") or {}),
             "period_starts": dict(stored.get("period_starts") or {}),
             "timers": list(stored.get("timers") or []),
+            "starters": list(stored.get("starters") or []),
+            "only_when": list(stored.get("only_when") or []),
+            "rules": list(stored.get("rules") or []),
         },
         "looks": dict(stored.get("looks") or {}),
         "dim_looks": dict(stored.get("dim_looks") or {}),
@@ -204,6 +210,7 @@ def snapshot(hass: HomeAssistant) -> dict[str, Any]:
             ],
             "people": sorted(state.entity_id for state in hass.states.async_all("person")),
             "workday_sensor": house.workday_sensor(),
+            "house_rules": list(house.options.get("house_rules") or []),
         },
         "rooms": [room_snapshot(hass, runner) for runner in house.rooms.values()],
     }
@@ -385,6 +392,9 @@ ROOM_FIELDS = vol.Schema(
         vol.Optional("blends"): {str: vol.All(vol.Coerce(int), vol.Range(min=0, max=1440))},
         vol.Optional("period_starts"): {str: vol.Any(None, str)},
         vol.Optional("timers"): [dict],
+        vol.Optional("starters"): [dict],
+        vol.Optional("only_when"): [dict],
+        vol.Optional("rules"): [dict],
     }
 )
 
@@ -494,6 +504,25 @@ def ws_save_tracks(hass: HomeAssistant, connection: websocket_api.ActiveConnecti
         return
     try:
         options = set_tracks(house.entry.options, msg)
+    except SettingsError as err:
+        _error(connection, msg, err)
+        return
+    _save(hass, house, options)
+    connection.send_result(msg["id"], {})
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/save_house_rules", vol.Required("rules"): [dict]}
+)
+@websocket_api.require_admin
+@callback
+def ws_save_house_rules(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    house = _house(hass)
+    if house is None:
+        connection.send_error(msg["id"], "not_set_up", "Room Routines isn't set up")
+        return
+    try:
+        options = set_house_rules(house.entry.options, msg["rules"])
     except SettingsError as err:
         _error(connection, msg, err)
         return

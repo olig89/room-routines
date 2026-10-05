@@ -16,7 +16,7 @@ be a Home Assistant scene. A light switched on by hand is left alone, and change
 made by hand are remembered so the page can suggest better looks or times. Each
 room can run in log-only mode first.
 
-**Status: early development (0.5.0).** Install through HACS as a custom repository.
+**Status: early development (0.6.0).** Install through HACS as a custom repository.
 
 ## What you get
 
@@ -56,6 +56,17 @@ room can run in log-only mode first.
     for wall buttons.
   A change made by hand while the routine runs pauses it until the lights are
   switched off. A room without sensors stays on until something switches it off.
+- **Listening to the rest of the house** (per room, all optional):
+  - **starters**: start the routine when any entity reaches a state (a computer
+    switching on, a door opening, someone coming home); unlike a motion sensor it
+    doesn't switch the room off when it changes back;
+  - **only when**: every way of starting needs all of these (use "isn't" for
+    "not while": baby bedtime isn't on);
+  - **while X**: rules that hold while an entity is (or isn't) in a state: do
+    nothing at all, use another look (a scene or another period's look), or keep
+    every light at or below a brightness. A lit room moves to the new look when a
+    rule starts or ends. **House rules** do the same for chosen rooms, or every
+    room (away from home, the baby asleep); a room's own rules come first.
 - **Fade-out:** lights with a native transition fade by themselves; others (KNX)
   get small brightness steps, and come back at their old level next time.
 - **Per room:** a *Status* sensor (idle / lights on by motion / switched on by

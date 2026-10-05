@@ -7,7 +7,7 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.5.0";
+const PANEL_VERSION = "0.6.0";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
@@ -27,10 +27,12 @@ const ON_BY_HAND = {
   leave: "Leave them as they are",
   routine: "Start the routine (after 3 seconds)",
 };
-const TIMER_DAYS = { every_day: "Every day", workdays: "Workdays", chosen_days: "Chosen days" };
+const TIMER_DAYS = { every_day: "Every day", workdays: "Workdays", days: "Chosen days" };
+const RULE_ACTIONS = { nothing: "Do nothing", look: "Use another look", cap: "No brighter than" };
 const ERRORS = {
   no_name: "Give the room a name.",
   invalid_room: "A room needs at least one light, a sensor can't both switch the lights on and only keep them on, and every timer needs a time.",
+  invalid_rules: "Every condition and rule needs an entity and a state; a rule using another look needs a scene or a period, and a brightness limit a level from 1 to 100 %.",
   invalid_room_times: "The room's own start times must give every period a different time.",
   invalid_periods: "Every period needs its own name and a start time no other period uses on the same days.",
   last_period: "There has to be at least one period.",
@@ -159,7 +161,7 @@ class RoomRoutinesPanel extends HTMLElement {
   }
 
   _editing() {
-    return !!(this._editLook || this._roomDraft || this._periodDraft || this._tracksDraft || this._scenePick);
+    return !!(this._editLook || this._roomDraft || this._periodDraft || this._tracksDraft || this._scenePick || this._houseRulesDraft);
   }
 
   get _admin() {
@@ -170,6 +172,18 @@ class RoomRoutinesPanel extends HTMLElement {
 
   _name(e) {
     return this._hass.states[e]?.attributes?.friendly_name || e;
+  }
+
+  _condText(c) {
+    if (!c?.entity) return "?";
+    return `${this._name(c.entity)} ${c.negate ? "isn't" : "is"} ${c.state || "on"}`;
+  }
+
+  _ruleText(r) {
+    let what = "do nothing";
+    if (r.action === "cap") what = `no brighter than ${r.max_pct} %`;
+    else if (r.action === "look") what = r.scene ? `turn on ${this._name(r.scene)}` : `use the ${r.period} look`;
+    return `while ${this._condText(r.when)}: ${what}`;
   }
 
   _areaOf(e) {
@@ -410,6 +424,8 @@ class RoomRoutinesPanel extends HTMLElement {
     if (room.state === "owned" && room.paused) label = "Changed by hand: following paused until the lights go off";
     else if (room.state === "owned" && !room.has_sensors) label = "Following its routine";
     const bits = [`<b>${esc(label)}</b>`];
+    if (room.rule) bits.push(`<span class="warntext">${esc(room.rule)}</span>`);
+    if (room.unmet) bits.push(`waiting: only when ${esc(room.unmet)}`);
     if (room.blending) bits.push(`blending into ${esc(room.blending.into)} (${Math.round(room.blending.fraction * 100)} %)`);
     if (room.mode === "log_only") bits.push(`<span class="muted">(log only: switching nothing)</span>`);
     if (room.lights_off_at) bits.push(`off in <span data-deadline="${esc(room.lights_off_at)}">${countdown(room.lights_off_at)}</span>`);
@@ -575,6 +591,10 @@ class RoomRoutinesPanel extends HTMLElement {
           : `<div>No sensors: the routine starts from ${(s.timers || []).some((t) => t.action !== "off") ? "its timers, " : ""}${s.on_by_hand === "routine" ? "the lights being switched on another way, " : ""}the <b>Start the routine</b> button or the <code>room_routines.switch_on</code> action, and runs until the lights are switched off.</div>`}
         <div>Lights switched on another way (a wall switch, an app): <b>${esc(ON_BY_HAND[s.on_by_hand || "leave"])}</b>. A change by hand while the routine runs pauses it until the lights go off.</div>
         ${(s.timers || []).map((t) => `<div>Timer: ${esc(this._timerText(t))}.</div>`).join("")}
+        ${(s.starters || []).map((c) => `<div>Starts when <b>${esc(this._condText(c))}</b>.</div>`).join("")}
+        ${(s.only_when || []).length ? `<div>Starts only when ${s.only_when.map((c) => `<b>${esc(this._condText(c))}</b>`).join(" and ")}.</div>` : ""}
+        ${[...(s.rules || []), ...((d.house.house_rules || []).filter((r) => !(r.rooms || []).length || r.rooms.includes(room.id)))]
+          .map((r) => `<div>Rule: ${esc(this._ruleText(r))}${(d.house.house_rules || []).includes(r) ? " <small class='muted'>(house rule)</small>" : ""}.</div>`).join("")}
         <div>When the period changes in a lit room, the lights move to the new look over <b>${esc(s.drift_s)} s</b>.</div>
         ${this._admin ? `<div class="row"><button class="btn small" data-action="edit-room" data-room="${esc(room.id)}">Change these settings</button></div>` : ""}
       </div>`;
@@ -832,6 +852,7 @@ class RoomRoutinesPanel extends HTMLElement {
     if (this._roomDraft) return this._roomForm();
     if (this._periodDraft) return this._periodForm();
     if (this._tracksDraft) return this._tracksForm();
+    if (this._houseRulesDraft) return this._houseRulesForm();
     return `
       <h2>Rooms</h2>
       <div class="card">
@@ -849,6 +870,13 @@ class RoomRoutinesPanel extends HTMLElement {
         <div>${d.house.order.map((p) => `<span class="chip" style="--c:${this._periodColour(p)}">${esc(p)} ${esc(d.house.periods.find((x) => x.name === p).start)}</span>`).join(" ")}</div>
         <div class="row"><button class="btn small" data-action="edit-periods">Change the periods</button></div>
       </div>
+      <h2>House rules</h2>
+      <div class="card">
+        ${(d.house.house_rules || []).length
+          ? (d.house.house_rules || []).map((r) => `<div>${esc(this._ruleText(r))} <small class="muted">${(r.rooms || []).length ? `in ${r.rooms.map((id) => esc(d.rooms.find((x) => x.id === id)?.name || id)).join(", ")}` : "in every room"}</small></div>`).join("")
+          : `<div class="meta">None. A house rule changes how rooms behave while something holds: away from home, the baby asleep.</div>`}
+        <div class="row"><button class="btn small" data-action="edit-house-rules">Change</button></div>
+      </div>
       <h2>Dark Days</h2>
       <div class="card">
         ${d.house.tracks?.enabled
@@ -863,15 +891,19 @@ class RoomRoutinesPanel extends HTMLElement {
     if (room) {
       this._roomDraft = { id: room.id, name: room.name, area_id: room.area_id, mode: room.mode, ...JSON.parse(JSON.stringify(room.settings)) };
     } else {
-      this._roomDraft = { id: null, name: "", area_id: null, lights: [], triggers: [], holds: [], lux_sensor: null, self_fading: [], on_by_hand: "leave", blends: {}, period_starts: {}, timers: [], ...ROOM_DEFAULTS };
+      this._roomDraft = { id: null, name: "", area_id: null, lights: [], triggers: [], holds: [], lux_sensor: null, self_fading: [], on_by_hand: "leave", blends: {}, period_starts: {}, timers: [], starters: [], only_when: [], rules: [], ...ROOM_DEFAULTS };
     }
     const r = this._roomDraft;
     r.on_by_hand = r.on_by_hand || "leave";
     r.blends = { ...(r.blends || {}) };
     r.period_starts = { ...(r.period_starts || {}) };
     r.timers = (r.timers || []).map((t) => ({ ...t, weekdays: [...(t.weekdays || [])], only_home: [...(t.only_home || [])] }));
+    r.starters = (r.starters || []).map((c) => ({ ...c }));
+    r.only_when = (r.only_when || []).map((c) => ({ ...c }));
+    r.rules = (r.rules || []).map((x) => ({ ...x, when: { ...(x.when || {}) } }));
     r.search = {};
     this._roomError = null;
+    this._entityList = null;
   }
 
   _roomForm() {
@@ -914,6 +946,7 @@ class RoomRoutinesPanel extends HTMLElement {
           ${r.lights.map((l) => `<label class="inline"><input type="checkbox" data-self-fading="${esc(l)}" ${r.self_fading.includes(l) ? "checked" : ""}> ${esc(this._name(l))}</label>`).join("")}
         </div></fieldset>` : ""}
         ${this._routineFields(r)}
+        ${this._rulesFields(r)}
         ${r.id ? `<label>Mode <select data-room-field="mode">${Object.entries(MODE_LABEL).map(([k, v]) => `<option value="${k}" ${k === r.mode ? "selected" : ""}>${v}</option>`).join("")}</select>
           <span class="help">${esc(MODE_HELP[r.mode] || "")}</span></label>` : `<p class="help">A new room starts in Log only, with every light on at its last brightness in every period.</p>`}
         <div class="row">
@@ -924,7 +957,7 @@ class RoomRoutinesPanel extends HTMLElement {
   }
 
   _timerText(t) {
-    const days = t.days === "chosen_days" ? (t.weekdays || []).map((i) => WEEKDAYS[i].slice(0, 3)).join(", ") || "no days" : (TIMER_DAYS[t.days] || "Every day").toLowerCase();
+    const days = t.days === "days" ? (t.weekdays || []).map((i) => WEEKDAYS[i].slice(0, 3)).join(", ") || "no days" : (TIMER_DAYS[t.days] || "Every day").toLowerCase();
     const bits = [`${t.action === "off" ? "switch off" : "start the routine"} at ${t.at || "?"}, ${days}`];
     if (t.only_dark) bits.push("only when it's dark");
     if ((t.only_home || []).length) bits.push(`only if ${t.only_home.map((p) => this._name(p)).join(" or ")} is home`);
@@ -949,7 +982,7 @@ class RoomRoutinesPanel extends HTMLElement {
           ${Object.entries(TIMER_DAYS).map(([k, v]) => `<option value="${k}" ${k === (t.days || "every_day") ? "selected" : ""}>${v}</option>`).join("")}
         </select>
         <button class="btn tiny danger" data-action="timer-remove" data-row="${i}">Remove</button>
-        ${t.days === "chosen_days" ? `<div>${WEEKDAYS.map((w, j) => `<label class="inline"><input type="checkbox" data-timer-day="${i}" data-day="${j}" ${(t.weekdays || []).includes(j) ? "checked" : ""}> ${w.slice(0, 3)}</label>`).join("")}</div>` : ""}
+        ${t.days === "days" ? `<div>${WEEKDAYS.map((w, j) => `<label class="inline"><input type="checkbox" data-timer-day="${i}" data-day="${j}" ${(t.weekdays || []).includes(j) ? "checked" : ""}> ${w.slice(0, 3)}</label>`).join("")}</div>` : ""}
         <div><label class="inline"><input type="checkbox" data-timer-check="${i}" data-field="only_dark" ${t.only_dark ? "checked" : ""}> Only when it's dark (the sun is down or it's a Dark Day)</label></div>
         ${people.length ? `<div>Only if one of these is home: ${people.map((p) => `<label class="inline"><input type="checkbox" data-timer-person="${i}" data-person="${esc(p)}" ${(t.only_home || []).includes(p) ? "checked" : ""}> ${esc(this._name(p))}</label>`).join("")}</div>` : ""}
       </div>`)
@@ -998,6 +1031,133 @@ class RoomRoutinesPanel extends HTMLElement {
       <input type="search" placeholder="Search for ${domain === "light" ? "a light" : "a sensor"}…" value="${esc(r.search[key] || "")}" data-pick-search="${esc(key)}">
       <div class="options">${matches.map((e) => `<button class="option" data-pick-add="${esc(key)}" data-entity="${esc(e)}">${esc(this._name(e))} <small>${esc(e)}${inArea(e) ? " · in this area" : ""}</small></button>`).join("") || `<span class="meta">${empty}</span>`}</div>
     </fieldset>`;
+  }
+
+  // ---- conditions and rules (room form and house rules) ----
+
+  _entityOptions() {
+    if (this._entityList) return this._entityList;
+    const states = this._hass.states;
+    const ids = Object.keys(states).sort((a, b) => this._name(a).localeCompare(this._name(b)));
+    this._entityList = `<datalist id="rr-entities">${ids
+      .filter((e) => !e.startsWith("scene.") && !e.startsWith("automation.") && !e.startsWith("update."))
+      .map((e) => `<option value="${esc(e)}">${esc(this._name(e))}</option>`).join("")}</datalist>`;
+    return this._entityList;
+  }
+
+  _condFields(root, base, c) {
+    const now = c.entity ? this._hass.states[c.entity]?.state : null;
+    return `<input class="ent" list="rr-entities" placeholder="entity id, e.g. binary_sensor.baby_bedtime" value="${esc(c.entity || "")}" data-root="${root}" data-edit="${base}.entity" data-rerender aria-label="Entity">
+      <select data-root="${root}" data-edit="${base}.negate" data-bool aria-label="Is or isn't">
+        <option value="" ${c.negate ? "" : "selected"}>is</option><option value="1" ${c.negate ? "selected" : ""}>isn't</option>
+      </select>
+      <input class="state" value="${esc(c.state || "on")}" data-root="${root}" data-edit="${base}.state" aria-label="State">
+      ${c.entity ? `<small class="muted">${now == null ? "not found" : `now ${esc(now)}`}</small>` : ""}`;
+  }
+
+  _ruleFields(root, base, r) {
+    const d = this._data;
+    const scenes = Object.keys(this._hass.states).filter((e) => e.startsWith("scene.")).sort((a, b) => this._name(a).localeCompare(this._name(b)));
+    const target = r.scene ? `scene:${r.scene}` : r.period ? `period:${r.period}` : "";
+    let extra = "";
+    if (r.action === "look") {
+      extra = `<select data-root="${root}" data-edit="${base}.@target" aria-label="Which look"><option value="">Choose…</option>
+        <optgroup label="Another period's look">${(d.house.order || []).map((p) => `<option value="period:${esc(p)}" ${target === `period:${p}` ? "selected" : ""}>${esc(p)}</option>`).join("")}</optgroup>
+        <optgroup label="A scene">${scenes.map((e) => `<option value="scene:${esc(e)}" ${target === `scene:${e}` ? "selected" : ""}>${esc(this._name(e))}</option>`).join("")}</optgroup>
+      </select>`;
+    } else if (r.action === "cap") {
+      extra = `<span class="inputunit"><input type="number" min="1" max="100" step="1" value="${esc(r.max_pct ?? 20)}" data-root="${root}" data-edit="${base}.max_pct" data-number aria-label="Brightness limit"> %</span>`;
+    }
+    return `While ${this._condFields(root, `${base}.when`, r.when)}
+      <div><select data-root="${root}" data-edit="${base}.action" data-rerender aria-label="What to do">
+        ${Object.entries(RULE_ACTIONS).map(([k, v]) => `<option value="${k}" ${k === r.action ? "selected" : ""}>${v}</option>`).join("")}
+      </select> ${extra}</div>`;
+  }
+
+  _condList(key, title, help) {
+    const list = this._roomDraft[key];
+    return `<h3>${esc(title)}</h3>
+      ${list.map((c, i) => `<div class="cond">${this._condFields("room", `${key}.${i}`, c)} <button class="btn tiny danger" data-action="cond-remove" data-list="${key}" data-row="${i}">Remove</button></div>`).join("") || `<div class="meta">None.</div>`}
+      <div class="row"><button class="btn small" data-action="cond-add" data-list="${key}">Add</button></div>
+      <span class="help">${help}</span>`;
+  }
+
+  _rulesFields(r) {
+    return `<fieldset><legend>Listening to the house</legend>
+      ${this._entityOptions()}
+      ${this._condList("starters", "Start the routine when", "Any entity: a computer switching on, a door opening, a person coming home. Unlike a motion sensor it doesn't switch the room off when it changes back. Type the state it must reach (on, home, open, playing…).")}
+      ${this._condList("only_when", "Only start when", "Every way of starting (motion, a starter, a timer, lights taken over, the switch_on action) needs all of these. Use “isn't” for “not while”: Baby bedtime isn't on.")}
+      <h3>While something holds</h3>
+      ${r.rules.map((rule, i) => `<div class="cond rule">${this._ruleFields("room", `rules.${i}`, rule)} <button class="btn tiny danger" data-action="rule-remove" data-root="room" data-row="${i}">Remove</button></div>`).join("") || `<div class="meta">None.</div>`}
+      <div class="row"><button class="btn small" data-action="rule-add" data-root="room">Add a rule</button></div>
+      <span class="help">Do nothing: the room doesn't start at all (a lit room still goes dark as usual). Another look: a scene, or another period's look. No brighter than: every light kept at or below a level. The first rule that holds wins, this room's before the house's. When a rule starts or ends, a lit room moves to its new look.</span>
+    </fieldset>`;
+  }
+
+  _houseRulesForm() {
+    const d = this._data;
+    const rules = this._houseRulesDraft.rules;
+    return `
+      <div class="detailhead"><button class="btn small" data-action="house-rules-cancel"><ha-icon icon="mdi:arrow-left"></ha-icon> Back</button></div>
+      <div class="card form">
+        <h2 class="inline">House rules</h2>
+        <p class="explain">While something holds, change how rooms behave: away from home (do nothing), the baby asleep (a night look, or no brighter than a level). Tick the rooms a rule is for; none ticked means every room. A room's own rules come first.</p>
+        ${this._houseRulesError ? `<div class="warntext">${esc(this._houseRulesError)}</div>` : ""}
+        ${this._entityOptions()}
+        ${rules.map((rule, i) => `<div class="cond rule">${this._ruleFields("house", `${i}`, rule)}
+          <div class="roomticks">${d.rooms.map((room) => `<label class="inline"><input type="checkbox" data-rule-room="${i}" data-room-id="${esc(room.id)}" ${(rule.rooms || []).includes(room.id) ? "checked" : ""}> ${esc(room.name)}</label>`).join("")}</div>
+          <button class="btn tiny danger" data-action="rule-remove" data-root="house" data-row="${i}">Remove</button></div>`).join("") || `<div class="meta">None.</div>`}
+        <div class="row"><button class="btn small" data-action="rule-add" data-root="house">Add a rule</button></div>
+        <div class="row">
+          <button class="btn primary" data-action="house-rules-save">Save</button>
+          <button class="btn" data-action="house-rules-cancel">Cancel</button>
+        </div>
+      </div>`;
+  }
+
+  _editRoot(name) {
+    return name === "house" ? this._houseRulesDraft.rules : this._roomDraft;
+  }
+
+  _setPath(obj, path, value) {
+    const keys = path.split(".");
+    let o = obj;
+    for (const k of keys.slice(0, -1)) o = o[/^\d+$/.test(k) ? Number(k) : k];
+    const last = keys[keys.length - 1];
+    if (last === "@target") {
+      const [kind, ...rest] = value.split(":");
+      const v = rest.join(":");
+      delete o.scene;
+      delete o.period;
+      if (kind === "scene") o.scene = v;
+      if (kind === "period") o.period = v;
+      return;
+    }
+    o[last] = value;
+  }
+
+  _cleanRules(rules, withRooms) {
+    return rules
+      .filter((r) => r.when?.entity)
+      .map((r) => {
+        const out = { when: { entity: r.when.entity.trim(), state: (r.when.state || "on").trim() }, action: r.action || "nothing" };
+        if (r.when.negate) out.when.negate = true;
+        if (out.action === "look") {
+          if (r.scene) out.scene = r.scene;
+          else if (r.period) out.period = r.period;
+        }
+        if (out.action === "cap") out.max_pct = Number(r.max_pct ?? 20);
+        if (withRooms && (r.rooms || []).length) out.rooms = r.rooms;
+        return out;
+      });
+  }
+
+  _cleanConds(list) {
+    return list.filter((c) => c.entity).map((c) => {
+      const out = { entity: c.entity.trim(), state: (c.state || "on").trim() };
+      if (c.negate) out.negate = true;
+      return out;
+    });
   }
 
   _startTracksDraft(d) {
@@ -1123,7 +1283,7 @@ class RoomRoutinesPanel extends HTMLElement {
         this._tab = b.dataset.tab;
         savePref("tab", this._tab);
         this._roomId = null;
-        this._editLook = this._roomDraft = this._periodDraft = this._tracksDraft = this._scenePick = null;
+        this._editLook = this._roomDraft = this._periodDraft = this._tracksDraft = this._scenePick = this._houseRulesDraft = null;
         this._notice = null;
         this._render();
       })
@@ -1210,6 +1370,22 @@ class RoomRoutinesPanel extends HTMLElement {
         this._roomDraft[key] = this._roomDraft[key].filter((e) => e !== el.dataset.entity);
         if (key === "lights") this._roomDraft.self_fading = this._roomDraft.self_fading.filter((e) => e !== el.dataset.entity);
         this._render();
+      })
+    );
+    root.querySelectorAll("[data-edit]").forEach((el) =>
+      el.addEventListener("change", () => {
+        let value = el.value;
+        if (el.dataset.bool !== undefined) value = el.value === "1";
+        else if (el.dataset.number !== undefined) value = el.value === "" ? null : Number(el.value);
+        this._setPath(this._editRoot(el.dataset.root), el.dataset.edit, value);
+        if (el.dataset.rerender !== undefined) this._render();
+      })
+    );
+    root.querySelectorAll("[data-rule-room]").forEach((el) =>
+      el.addEventListener("change", () => {
+        const rule = this._houseRulesDraft.rules[Number(el.dataset.ruleRoom)];
+        rule.rooms = (rule.rooms || []).filter((x) => x !== el.dataset.roomId);
+        if (el.checked) rule.rooms.push(el.dataset.roomId);
       })
     );
     root.querySelectorAll("[data-own-start]").forEach((el) =>
@@ -1540,6 +1716,43 @@ class RoomRoutinesPanel extends HTMLElement {
         this._render();
         return;
       }
+      case "cond-add":
+        this._roomDraft[el.dataset.list].push({ entity: "", state: "on", negate: false });
+        this._render();
+        return;
+      case "cond-remove":
+        this._roomDraft[el.dataset.list].splice(Number(el.dataset.row), 1);
+        this._render();
+        return;
+      case "rule-add":
+        (el.dataset.root === "house" ? this._houseRulesDraft.rules : this._roomDraft.rules).push({ when: { entity: "", state: "on" }, action: "nothing", rooms: [] });
+        this._render();
+        return;
+      case "rule-remove":
+        (el.dataset.root === "house" ? this._houseRulesDraft.rules : this._roomDraft.rules).splice(Number(el.dataset.row), 1);
+        this._render();
+        return;
+      case "edit-house-rules":
+        this._houseRulesDraft = { rules: (d.house.house_rules || []).map((x) => ({ ...x, when: { ...x.when }, rooms: [...(x.rooms || [])] })) };
+        this._houseRulesError = null;
+        this._entityList = null;
+        this._render();
+        return;
+      case "house-rules-cancel":
+        this._houseRulesDraft = null;
+        this._render();
+        return;
+      case "house-rules-save": {
+        const res = await this._ws({ type: "room_routines/save_house_rules", rules: this._cleanRules(this._houseRulesDraft.rules, true) }, "Saved the house rules.");
+        if (!res.ok) {
+          this._houseRulesError = res.error;
+          this._render();
+          return;
+        }
+        this._houseRulesDraft = null;
+        this._render();
+        return;
+      }
       case "timer-add":
         this._roomDraft.timers.push({ at: "", action: "on", days: "every_day", weekdays: [], only_dark: false, only_home: [] });
         this._render();
@@ -1580,9 +1793,12 @@ class RoomRoutinesPanel extends HTMLElement {
           on_by_hand: r.on_by_hand || "leave",
           blends: r.blends,
           period_starts: r.period_starts,
+          starters: this._cleanConds(r.starters),
+          only_when: this._cleanConds(r.only_when),
+          rules: this._cleanRules(r.rules, false),
           timers: r.timers.map((t) => {
             const out = { at: t.at || "", action: t.action || "on", days: t.days || "every_day" };
-            if (out.days === "chosen_days") out.weekdays = t.weekdays || [];
+            if (out.days === "days") out.weekdays = t.weekdays || [];
             if (t.only_dark) out.only_dark = true;
             if ((t.only_home || []).length) out.only_home = t.only_home;
             return out;
@@ -1716,6 +1932,11 @@ const STYLES = `
   .openrow:hover td, .openrow:focus-visible td { background: var(--secondary-background-color); }
   .timer { border-top:1px solid var(--divider-color); padding:8px 0; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
   .timer > div { flex-basis:100%; }
+  .cond { border-top:1px solid var(--divider-color); padding:8px 0; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+  .cond > div { flex-basis:100%; }
+  .cond input.ent { flex:1 1 220px; min-width:180px; }
+  .cond input.state { width:90px; }
+  .roomticks { display:flex; flex-wrap:wrap; gap:4px 12px; }
   ha-icon.small { --mdc-icon-size:16px; }
   .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
   .swatch { display:inline-block; width:12px; height:12px; border-radius:3px; vertical-align:middle; border:1px solid var(--divider-color); }

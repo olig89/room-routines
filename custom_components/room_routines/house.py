@@ -80,6 +80,7 @@ from .core.daylight import MIN_ELEVATION, DaylightReference
 from .core.sun import SunPosition, clear_sky, position
 from .core.room import BLEND_STEP
 from .core.timers import ON as TIMER_ON
+from .core.rules import Condition, Rule, active_rule, describe_condition, describe_rule, first_unmet, rule_from
 from .core.timers import Timer, Today, describe, due
 from .core.tracks import DIM, WEATHER_STALE, TrackChooser, default_periods
 
@@ -144,6 +145,10 @@ class RoomRunner:
         self._pending_change: CALLBACK_TYPE | None = None
         self._own_period: CALLBACK_TYPE | None = None
         self._warned_scenes: set[str] = set()
+        # The room's own rules first, then the house's that cover it.
+        self.rules: tuple[Rule, ...] = tuple(self.config.rules) + tuple(
+            r for r in house.house_rules if r.applies_to(self.room_id)
+        )
 
     # -- life cycle --
 
@@ -163,6 +168,9 @@ class RoomRunner:
                     self.hass, self._timer_callback(timer), hour=timer.at.hour, minute=timer.at.minute, second=0
                 )
             )
+        watched = self.context_entities()
+        if watched:
+            self._unsubs.append(async_track_state_change_event(self.hass, watched, self._on_context))
         self._unsubs.append(async_track_state_change_event(self.hass, list(self.config.lights), self._on_light))
         if self.lux_sensor:
             self._unsubs.append(async_track_state_change_event(self.hass, [self.lux_sensor], self._on_lux))
@@ -202,6 +210,8 @@ class RoomRunner:
         for sensor in (*self.config.triggers, *self.config.holds):
             state = self.hass.states.get(sensor)
             self.room.sensors[sensor] = state is not None and state.state == STATE_ON
+        rule, rule_text, unmet_text = self._context(self._states())
+        self.room.rule, self.room.rule_text, self.room.unmet_text = rule, rule_text, unmet_text
         self._offer_lux(self.hass.states.get(self.lux_sensor) if self.lux_sensor else None, now)
         self._notify()
 
@@ -276,6 +286,64 @@ class RoomRunner:
         except ValueError:
             return
         self.room.lux(value, now)
+
+    # -- what else the room listens to --
+
+    def context_entities(self) -> list[str]:
+        """Starters, "only when" conditions and rules: the entities they read."""
+        found = [c.entity for c in self.config.starters]
+        found += [c.entity for c in self.config.only_when]
+        found += [r.when.entity for r in self.rules]
+        return sorted(set(found))
+
+    def _states(self, override: Mapping[str, str | None] | None = None) -> dict[str, str | None]:
+        states: dict[str, str | None] = {}
+        for entity in self.context_entities():
+            state = self.hass.states.get(entity)
+            states[entity] = state.state if state is not None else None
+        if override:
+            states.update(override)
+        return states
+
+    def _name_of(self, entity: str) -> str:
+        state = self.hass.states.get(entity)
+        if state is not None and state.attributes.get("friendly_name"):
+            return str(state.attributes["friendly_name"])
+        return entity
+
+    def _context(self, states: Mapping[str, str | None]) -> tuple[Rule | None, str, str]:
+        rule = active_rule(self.rules, states)
+        rule_text = describe_rule(rule, self._name_of(rule.when.entity)) if rule else ""
+        if rule is not None and rule.scene:
+            rule_text = rule_text.replace(rule.scene, self._name_of(rule.scene))
+        unmet = first_unmet(self.config.only_when, states)
+        unmet_text = describe_condition(unmet, self._name_of(unmet.entity)) if unmet else ""
+        return rule, rule_text, unmet_text
+
+    @callback
+    def _on_context(self, event: Event[EventStateChangedData]) -> None:
+        if self.room is None or self.mode == MODE_OFF:
+            return
+        entity = event.data["entity_id"]
+        old, new = event.data["old_state"], event.data["new_state"]
+        now = dt_util.now()
+        rule, rule_text, unmet_text = self._context(self._states())
+        self._run(self.room.set_context(rule, rule_text, unmet_text, now))
+        # A starter fires when it becomes true, not while it stays true.
+        before = {entity: old.state if old is not None else None}
+        after = {entity: new.state if new is not None else None}
+        for starter in self.config.starters:
+            if starter.entity == entity and starter.holds(after) and not starter.holds(before):
+                self._run(self.room.start(now, describe_condition(starter, self._name_of(entity))))
+                break
+
+    def context_status(self) -> dict[str, Any]:
+        """For the page: the rule in force and any unmet "only when"."""
+        room = self.room
+        return {
+            "rule": room.rule_text if room is not None and room.rule is not None else None,
+            "unmet": room.unmet_text if room is not None and room.unmet_text else None,
+        }
 
     # -- from the house --
 
@@ -725,6 +793,9 @@ class House:
         self._store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, f"{DOMAIN}.habits")
         self._daylight_store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, f"{DOMAIN}.daylight")
         self._learned: dict[str, datetime] = {}  # sensor -> statistics read up to
+        self.house_rules: tuple[Rule, ...] = tuple(
+            rule_from(r) for r in self.options.get("house_rules") or ()
+        )
         self.weather: dict[str, Any] = {}  # the last weather answer, for the page
         self.weather_failed_at: datetime | None = None  # the last fetch that failed, if after the last answer
         self.rooms = {rid: RoomRunner(self, setup) for rid, setup in rooms_from(self.options).items()}
