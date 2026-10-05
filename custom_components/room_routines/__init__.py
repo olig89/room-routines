@@ -13,7 +13,7 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID, EVENT_HOMEASSISTANT_STARTED, Platform
-from homeassistant.core import CoreState, Event, HomeAssistant, ServiceCall, callback
+from homeassistant.core import CALLBACK_TYPE, CoreState, Event, HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import config_validation as cv, device_registry as dr
@@ -204,12 +204,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: RoomRoutinesConfigEntry)
     if hass.state is CoreState.running:
         _add_area_rooms(hass, entry)
     else:
+        # A one-time listener removes itself when it fires; removing it again on
+        # unload makes Home Assistant log an error, so forget it once it has run.
+        unsub: CALLBACK_TYPE | None = None
 
         @callback
         def _started(_event: Event) -> None:
+            nonlocal unsub
+            unsub = None
             _add_area_rooms(hass, entry)
 
-        entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _started))
+        @callback
+        def _cancel() -> None:
+            if unsub is not None:
+                unsub()
+
+        unsub = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _started)
+        entry.async_on_unload(_cancel)
     await _async_register_panel(hass)
     async_dispatcher_send(hass, ANY_SIGNAL)
     return True
