@@ -8,10 +8,23 @@ plain-language reason, which becomes the room's status and log line.
 States:
 
 - **idle**: lights off (as far as the room knows). Motion may switch them on.
-- **owned**: the room switched the lights on, so it will also switch them off
-  once the room has been empty for the timeout.
+- **owned**: the routine is running: the room switched the lights on (motion,
+  a timer, a button calling ``start``) and follows the day with them. With
+  sensors it switches them off once the room has been empty for the timeout;
+  a room without sensors keeps them on until someone (or a timer) switches
+  them off.
 - **manual**: someone else switched a light on. The room does nothing until
-  every light is off again.
+  every light is off again. A room set to ``on_by_hand = ROUTINE`` instead
+  takes such lights over after a few seconds and runs its routine on them.
+
+Following the day: a lit, owned room drifts to each new period's look and,
+where the room asks for it, blends gradually into the next period's look over
+the last minutes of a period (``blends``). As soon as someone changes the
+lights by hand, the room stops following until the lights are switched off.
+
+A room can have its own start times for some periods (``period_starts``: an
+office whose evening starts after the working day), and timers that start or
+stop the routine at set times (see ``timers``).
 
 After someone switches the room's lights off by hand, motion is ignored for
 the cooldown, so a person can leave a room in the dark.
@@ -47,15 +60,24 @@ wiring.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from enum import Enum
 
-from .looks import Look, LookSource, resolve, scaled
+from .blend import blend, blendable, fraction
+from .looks import LightTarget, Look, LookSource, resolve, scaled
 from .lux import AmbientTracker, dark_enough
 from .periods import Schedule
+from .timers import Timer
 from .tracks import NORMAL, TRACK_LABELS
+
+LEAVE = "leave"
+ROUTINE = "routine"
+ADOPT_WAIT = timedelta(seconds=3)  # let a hand switch-on settle before taking over
+BLEND_STEP = timedelta(minutes=2)  # how often a blending room is moved on
+
+SceneReader = Callable[[str], Mapping[str, LightTarget] | None]
 
 
 class State(Enum):
@@ -79,6 +101,14 @@ class RoomConfig:
     fade_out: timedelta = timedelta(seconds=15)
     powered_by: Mapping[str, str] = field(default_factory=dict)  # bulb -> power circuit
     blinds_with_periods: bool = False
+    # Lights switched on some other way (a wall button, the app): LEAVE them, or
+    # bring them to the routine's look and follow it (ROUTINE).
+    on_by_hand: str = "leave"
+    # Blend into the next period over the last N minutes of a period: {period: minutes}.
+    blends: Mapping[str, float] = field(default_factory=dict)
+    # The room's own start times for some periods: {period: time}. The house's otherwise.
+    period_starts: Mapping[str, time] = field(default_factory=dict)
+    timers: tuple[Timer, ...] = ()
 
     def __post_init__(self) -> None:
         overlap = set(self.triggers) & set(self.holds)
@@ -86,6 +116,14 @@ class RoomConfig:
             raise ValueError(f"a sensor can't be both trigger and hold: {sorted(overlap)}")
         if not self.lights:
             raise ValueError("a room needs at least one light")
+        if self.on_by_hand not in (LEAVE, ROUTINE):
+            raise ValueError(f"unknown on_by_hand {self.on_by_hand!r}")
+        if any(m < 0 for m in self.blends.values()):
+            raise ValueError("blend minutes can't be negative")
+
+    @property
+    def has_sensors(self) -> bool:
+        return bool(self.triggers or self.holds)
 
     def switchable(self) -> tuple[str, ...]:
         """The lights the room may switch off: never a power circuit."""
@@ -162,12 +200,14 @@ class Room:
         stealth: bool = False,
         track: str = NORMAL,
         auto_dim: float = 1.0,
+        scene_reader: SceneReader | None = None,
     ) -> None:
         self.config = config
         self.schedule = schedule
         self.period = period
         self.track = track
         self.auto_dim = auto_dim  # house-wide: Normal looks at this factor on Dark Days
+        self.scene_reader = scene_reader
         self.owned_at: datetime | None = None
         self.ambient = ambient or AmbientTracker()
         if lights_on:
@@ -179,6 +219,12 @@ class Room:
         self.deadline: datetime | None = None
         self.cooldown_until: datetime | None = None
         self.stealth = stealth
+        # Someone changed the lights the room switched on: it stops following the
+        # day (period changes, blending) until the lights are switched off.
+        self.paused = False
+        # Lights switched on by hand in a ROUTINE room: taken over at this time.
+        self.adopt_at: datetime | None = None
+        self._last_blend: Look | None = None
         self.last = Decision(reason="manual: lights were on at start" if lights_on else "idle")
 
     # -- helpers --
@@ -199,12 +245,15 @@ class Room:
     def _look(self) -> Look:
         return self.source().look
 
+    def _factor_for(self, source: LookSource) -> float:
+        if self.track != NORMAL and source.track == NORMAL:
+            return self.auto_dim
+        return 1.0
+
     def dim_factor(self) -> float:
         """Dark Day brightness for the look in use: on a Dark Day, a Normal look is
         turned down (or up)."""
-        if self.track != NORMAL and self.source().track == NORMAL:
-            return self.auto_dim
-        return 1.0
+        return self._factor_for(self.source())
 
     def _to_apply(self, look: Look) -> tuple[Look, float]:
         """The look as sent (motion never moves blinds), with auto-dim applied
@@ -213,6 +262,46 @@ class Room:
         if look.scene:
             return Look(scene=look.scene), factor
         return scaled(Look(look.lights), factor), 1.0
+
+    def _as_lights(self, source: LookSource) -> Look | None:
+        """A look as plain lights, ready to send (a scene read where possible)."""
+        look = source.look
+        if look.scene:
+            lights = self.scene_reader(look.scene) if self.scene_reader else None
+            if lights is None:
+                return None
+            look = Look(dict(lights))
+        if not blendable(look):
+            return None
+        return scaled(Look(look.lights), self._factor_for(source))
+
+    def blending(self, now: datetime) -> tuple[float, str, Look] | None:
+        """(fraction, next period, blended look) while the room is blending, else None."""
+        minutes = self.config.blends.get(self.period, 0)
+        if not minutes:
+            return None
+        at = self.schedule.current(now)
+        if at.name != self.period:
+            return None  # the period was chosen by hand: no blending
+        f = fraction(now, at.next_start, minutes)
+        if f is None:
+            return None
+        here = self._as_lights(self.source())
+        there = self._as_lights(
+            resolve(at.next_name, self.track, self.config.looks, self.config.dim_looks, self.schedule)
+        )
+        if here is None or there is None:
+            return None
+        return f, at.next_name, blend(here, there, f)
+
+    def _target(self, now: datetime) -> tuple[Look, float, str]:
+        """What to send now: (look, factor still to apply, its name for the log)."""
+        b = self.blending(now)
+        if b is not None:
+            f, nxt, look = b
+            return look, 1.0, f"{self.period} look, blending into {nxt} ({round(f * 100)} %)"
+        look, factor = self._to_apply(self._look())
+        return look, factor, self._look_name()
 
     def _look_name(self) -> str:
         dim = self.source().track != NORMAL
@@ -233,8 +322,8 @@ class Room:
 
     def _check_timer(self, now: datetime) -> Decision | None:
         """Start or cancel the switch-off countdown for an owned room."""
-        if self.state is not State.OWNED:
-            return None
+        if self.state is not State.OWNED or not self.config.has_sensors:
+            return None  # a room without sensors keeps its lights until switched off
         if self.occupied():
             if self.deadline is not None:
                 self.deadline = None
@@ -247,6 +336,23 @@ class Room:
                 WakeAt(self.deadline),
             )
         return None
+
+    def _own(self, now: datetime) -> None:
+        self.state = State.OWNED
+        self.owned_at = now
+        self.deadline = None
+        self.paused = False
+        self.adopt_at = None
+        self._last_blend = None
+        self.ambient.lights_changed(True, now)
+
+    def _go_idle(self) -> None:
+        self.state = State.IDLE
+        self.deadline = None
+        self.owned_at = None
+        self.paused = False
+        self.adopt_at = None
+        self._last_blend = None
 
     # -- events --
 
@@ -275,19 +381,37 @@ class Room:
                 f"motion at {entity}, but too bright ({ambient:g} lux, switches on below "
                 f"{self.config.threshold_lux:g})"
             )
-        look = self._look()
-        if look.nothing:
+        if self._look().nothing:
             return self._decide(f"motion at {entity}: {self._look_name()} is 'do nothing'")
-        motion_look, factor = self._to_apply(look)
-        self.state = State.OWNED
-        self.owned_at = now
-        self.deadline = None
-        self.ambient.lights_changed(True, now)
+        look, factor, name = self._target(now)
+        self._own(now)
         lux = "unknown" if ambient is None else f"{ambient:g} lux"
         return self._decide(
-            f"motion at {entity}: {self._look_name()} (ambient {lux})",
-            ApplyLook(motion_look, self._power_for(motion_look), factor=factor),
+            f"motion at {entity}: {name} (ambient {lux})",
+            ApplyLook(look, self._power_for(look), factor=factor),
         )
+
+    def start(self, now: datetime, why: str) -> Decision:
+        """Start the routine (a timer, a button, the switch_on action): the current
+        look, then following the day, whatever the lights were doing."""
+        if self._look().nothing:
+            return self._decide(f"{why}: {self._look_name()} is 'do nothing'")
+        look, factor, name = self._target(now)
+        self._own(now)
+        decision = self._decide(f"{why}: {name}", ApplyLook(look, self._power_for(look), factor=factor))
+        countdown = self._check_timer(now)
+        if countdown is not None:
+            return Decision(decision.actions + countdown.actions, f"{decision.reason}; {countdown.reason}")
+        return decision
+
+    def stop(self, now: datetime, why: str) -> Decision:
+        """Switch the room's lights off (a timer, the switch_off action)."""
+        if self.state is State.IDLE:
+            return self._decide(f"{why}: already off")
+        self._go_idle()
+        self.ambient.lights_changed(False, now)
+        fade = self.config.fade_out if self.config.fade_out > timedelta(0) else None
+        return self._decide(f"{why}: lights off", TurnOff(self.config.switchable(), fade))
 
     def _hand_change(self, kind: str, now: datetime) -> HandChange:
         since = self.owned_at or now
@@ -301,21 +425,25 @@ class Room:
         if self.state is State.IDLE:
             if any_on:
                 self.state = State.MANUAL
+                if self.config.on_by_hand == ROUTINE:
+                    self.adopt_at = now + ADOPT_WAIT
+                    return self._decide("switched on by hand: bringing it to the routine", WakeAt(self.adopt_at))
                 return self._decide("manual: a light was switched on by hand")
             return self._unchanged()
         if any_on:
-            # Dimmed or partly switched by hand: an owned room keeps ownership
-            # and still switches off after the timeout.
             if self.state is State.MANUAL:
                 return self._unchanged()
+            # Changed by hand: the room stops following the day until the lights go
+            # off; a room with sensors still switches off once it is empty.
+            self.paused = True
+            tail = ", still switches off when empty" if self.config.has_sensors else ""
             self.last = Decision(
-                (), "owned: adjusted by hand, still switches off when empty", self._hand_change(ADJUSTED, now)
+                (), f"adjusted by hand: following paused until the lights are switched off{tail}",
+                self._hand_change(ADJUSTED, now),
             )
             return self.last
         change = self._hand_change(SWITCHED_OFF, now) if self.state is State.OWNED else None
-        self.state = State.IDLE
-        self.deadline = None
-        self.owned_at = None
+        self._go_idle()
         self.cooldown_until = now + self.config.cooldown
         self.last = Decision(
             (), f"switched off by hand: motion ignored for {int(self.config.cooldown.total_seconds())} s", change
@@ -327,25 +455,45 @@ class Room:
 
     def period_changed(self, period: str, now: datetime) -> Decision:
         self.period = period
-        return self._restyle(f"period is now {period}", blinds=True)
+        self._last_blend = None
+        return self._restyle(f"period is now {period}", blinds=True, now=now)
 
     def track_changed(self, track: str, now: datetime) -> Decision:
         if track == self.track:
             return self._unchanged()
         self.track = track
-        return self._restyle(TRACK_LABELS.get(track, track), blinds=False)
+        return self._restyle(TRACK_LABELS.get(track, track), blinds=False, now=now)
 
-    def _restyle(self, reason: str, blinds: bool) -> Decision:
+    def _restyle(self, reason: str, blinds: bool, now: datetime) -> Decision:
         """The look changed under the room: move a lit room to it."""
         look = self._look()
         actions: list[Action] = []
         if blinds and self.config.blinds_with_periods and look.blinds:
             actions.append(MoveBlinds(look.blinds))
         if self.state is State.OWNED and not look.nothing:
-            lit, factor = self._to_apply(look)
-            actions.append(ApplyLook(lit, self._power_for(lit), self.config.drift, factor))
-            reason += f": drifting to the {self._look_name()}"
+            if self.paused:
+                reason += ": lights left as changed by hand"
+            else:
+                lit, factor, name = self._target(now)
+                actions.append(ApplyLook(lit, self._power_for(lit), self.config.drift, factor))
+                reason += f": drifting to the {name}"
         return self._decide(reason, *actions)
+
+    def blend_tick(self, now: datetime) -> Decision:
+        """Move a lit, blending room one step on (called every ``BLEND_STEP``)."""
+        if self.state is not State.OWNED or self.paused:
+            return self._unchanged()
+        b = self.blending(now)
+        if b is None:
+            return self._unchanged()
+        f, nxt, look = b
+        if look == self._last_blend:
+            return self._unchanged()
+        self._last_blend = look
+        return self._decide(
+            f"{self.period} look, blending into {nxt} ({round(f * 100)} %)",
+            ApplyLook(look, self._power_for(look), BLEND_STEP),
+        )
 
     def set_stealth(self, on: bool, now: datetime) -> Decision:
         self.stealth = on
@@ -358,14 +506,16 @@ class Room:
         return self._check_timer(now) or self._decide(f"stealth mode off: {self.state.value}")
 
     def tick(self, now: datetime) -> Decision:
+        if self.adopt_at is not None and now >= self.adopt_at:
+            self.adopt_at = None
+            if self.state is State.MANUAL:
+                return self.start(now, "switched on by hand")
         if self.state is not State.OWNED or self.deadline is None or now < self.deadline:
             return self._unchanged()
         if self.occupied():
             self.deadline = None
             return self._decide("owned: occupied")
-        self.state = State.IDLE
-        self.deadline = None
-        self.owned_at = None
+        self._go_idle()
         self.ambient.lights_changed(False, now)
         fade = self.config.fade_out if self.config.fade_out > timedelta(0) else None
         return self._decide("empty for the timeout: lights off", TurnOff(self.config.switchable(), fade))

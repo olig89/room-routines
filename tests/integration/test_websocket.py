@@ -72,7 +72,7 @@ async def test_add_edit_and_remove_a_room(hass, ws):
     await hass.async_block_till_done()
     assert entry.options["rooms"][room_id]["timeout_s"] == 120
 
-    await ws.send_json({"id": 3, "type": "room_routines/save_room", "room": {**room, "triggers": []}})
+    await ws.send_json({"id": 3, "type": "room_routines/save_room", "room": {**room, "lights": []}})
     reply = await ws.receive_json()
     assert not reply["success"] and reply["error"]["code"] == "invalid_room"
 

@@ -7,7 +7,7 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.4.1";
+const PANEL_VERSION = "0.5.0";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
@@ -23,9 +23,15 @@ const MODE_HELP = {
 const PERIOD_COLOURS = ["#3949ab", "#8e24aa", "#fb8c00", "#fdd835", "#43a047", "#00acc1", "#e53935", "#6d4c41"];
 const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const ROOM_DEFAULTS = { threshold_lux: 50, timeout_s: 30, fade_out_s: 15, cooldown_s: 30, drift_s: 90 };
+const ON_BY_HAND = {
+  leave: "Leave them as they are",
+  routine: "Start the routine (after 3 seconds)",
+};
+const TIMER_DAYS = { every_day: "Every day", workdays: "Workdays", chosen_days: "Chosen days" };
 const ERRORS = {
   no_name: "Give the room a name.",
-  invalid_room: "A room needs at least one light and at least one sensor that switches the lights on, and a sensor can't have both roles.",
+  invalid_room: "A room needs at least one light, a sensor can't both switch the lights on and only keep them on, and every timer needs a time.",
+  invalid_room_times: "The room's own start times must give every period a different time.",
   invalid_periods: "Every period needs its own name and a start time no other period uses on the same days.",
   last_period: "There has to be at least one period.",
   unknown_period: "That period no longer exists. Reload the page.",
@@ -379,11 +385,32 @@ class RoomRoutinesPanel extends HTMLElement {
           ${Object.entries(TRACK_LABEL).map(([k, v]) => `<option value="${k}" ${k === d.house.track ? "selected" : ""}>${v}</option>`).join("")}
         </select>${d.house.track_by_hand ? ` <small class="muted">(by hand until the next period)</small>` : ""}</label>` : ""}
       </div>
-      <div class="grid">${d.rooms.map((r) => this._card(d, r)).join("")}</div>`;
+      ${this._roomGrid(d)}`;
+  }
+
+  _roomGrid(d) {
+    const on = d.rooms.filter((r) => r.mode !== "off");
+    const off = d.rooms.filter((r) => r.mode === "off");
+    const openOff = loadPref("off-rooms", false);
+    return `
+      ${on.length ? `<div class="grid">${on.map((r) => this._card(d, r)).join("")}</div>` : `<div class="card meta">Every room is off. Open one below and give it something to do.</div>`}
+      ${off.length ? `<details class="offrooms" data-pref="off-rooms" ${openOff ? "open" : ""}>
+        <summary>${off.length} room${off.length === 1 ? "" : "s"} switched off</summary>
+        <div class="card"><table class="plain">${off
+          .map((r) => `<tr class="openrow" data-open="${esc(r.id)}" tabindex="0" role="button" aria-label="Open ${esc(r.name)}">
+            <td><b>${esc(r.name)}</b><div class="meta">${r.settings.lights.length} light${r.settings.lights.length === 1 ? "" : "s"}${r.has_sensors ? "" : ", no sensors"}</div></td>
+            <td class="actions" data-stop>${this._modePill(r)}</td></tr>`)
+          .join("")}</table>
+        <p class="explain">Every area with lights becomes a room, switched off so it does nothing until you set it up. ${this._admin ? "Hide the ones you'll never use under Settings." : ""}</p></div>
+      </details>` : ""}`;
   }
 
   _statusLine(room) {
-    const bits = [`<b>${esc(STATE_LABEL[room.state] || room.state || "Starting")}</b>`];
+    let label = STATE_LABEL[room.state] || room.state || "Starting";
+    if (room.state === "owned" && room.paused) label = "Changed by hand: following paused until the lights go off";
+    else if (room.state === "owned" && !room.has_sensors) label = "Following its routine";
+    const bits = [`<b>${esc(label)}</b>`];
+    if (room.blending) bits.push(`blending into ${esc(room.blending.into)} (${Math.round(room.blending.fraction * 100)} %)`);
     if (room.mode === "log_only") bits.push(`<span class="muted">(log only: switching nothing)</span>`);
     if (room.lights_off_at) bits.push(`off in <span data-deadline="${esc(room.lights_off_at)}">${countdown(room.lights_off_at)}</span>`);
     if (room.cooldown_until && new Date(room.cooldown_until) > new Date()) {
@@ -393,6 +420,7 @@ class RoomRoutinesPanel extends HTMLElement {
   }
 
   _luxLine(room) {
+    if (!room.has_sensors) return "";
     const t = room.settings.threshold_lux;
     if (!room.settings.lux_sensor) return t == null ? "" : "No light-level sensor: switches on at any light level";
     if (room.ambient == null) return `Light level unknown, so it counts as dark${t != null ? ` (switches on below ${t} lx)` : ""}`;
@@ -421,6 +449,20 @@ class RoomRoutinesPanel extends HTMLElement {
       .join("");
   }
 
+  // A room with its own period times, or blends, says so.
+  _ownTimesLine(d, room) {
+    const s = room.settings;
+    const bits = [];
+    const starts = Object.entries(s.period_starts || {});
+    if (starts.length) bits.push(`its own times: ${starts.map(([p, t]) => `${esc(p)} from ${esc(t)}`).join(", ")}`);
+    const blends = Object.entries(s.blends || {});
+    if (blends.length) bits.push(blends.map(([p, m]) => `${esc(p)} blends into the next period over ${esc(m)} min`).join(", "));
+    if ((s.timers || []).length) bits.push(`${s.timers.length} timer${s.timers.length === 1 ? "" : "s"}`);
+    if (!bits.length) return "";
+    const differs = room.period && room.period !== d.house.period;
+    return `<div class="meta"><ha-icon class="small" icon="mdi:clock-outline"></ha-icon> ${differs ? `In <b>${esc(room.period)}</b> (the house is in ${esc(d.house.period)}); ` : ""}${bits.join("; ")}.</div>`;
+  }
+
   _modePill(room) {
     if (!this._admin) return `<span class="pill mode-${esc(room.mode)}">${esc(MODE_LABEL[room.mode] || room.mode)}</span>`;
     return `<select class="pill mode-${esc(room.mode)}" data-action="mode" data-room="${esc(room.id)}" title="${esc(MODE_HELP[room.mode] || "")}" aria-label="Mode for ${esc(room.name)}">
@@ -429,7 +471,8 @@ class RoomRoutinesPanel extends HTMLElement {
   }
 
   _card(d, room) {
-    const from = room.look_period && room.look_period !== d.house.period ? ` (uses ${esc(room.look_period)}'s)` : "";
+    const period = room.period || d.house.period;
+    const from = room.look_period && room.look_period !== period ? ` (uses ${esc(room.look_period)}'s)` : "";
     return `<div class="card room" data-open="${esc(room.id)}" tabindex="0" role="button" aria-label="Open ${esc(room.name)}">
       <div class="roomhead">
         <div><div class="roomname">${esc(room.name)}</div><div class="meta">${esc(room.area_name || "No area")}</div></div>
@@ -437,10 +480,11 @@ class RoomRoutinesPanel extends HTMLElement {
       </div>
       <div class="status">${this._statusLine(room)}</div>
       ${room.reason ? `<div class="meta reason">${esc(room.reason)}</div>` : ""}
-      <div class="meta">${this._luxLine(room)}</div>
-      <div class="chips">${this._sensorDots(room)}</div>
+      ${this._luxLine(room) ? `<div class="meta">${this._luxLine(room)}</div>` : ""}
+      ${this._ownTimesLine(d, room)}
+      ${room.has_sensors ? `<div class="chips">${this._sensorDots(room)}</div>` : ""}
       <div class="chips">${this._lightChips(room)}</div>
-      <div class="meta look"><b>${esc(d.house.period)} look${room.look_track === "dim" ? " for Dark Days" : ""}${from}${room.look_factor && room.look_factor !== 1 ? ` at ${Math.round(room.look_factor * 100)} %` : ""}:</b> ${this._lookText(room.current_look, room.settings.lights)}</div>
+      <div class="meta look"><b>${esc(period)} look${room.look_track === "dim" ? " for Dark Days" : ""}${from}${room.look_factor && room.look_factor !== 1 ? ` at ${Math.round(room.look_factor * 100)} %` : ""}:</b> ${this._lookText(room.current_look, room.settings.lights)}</div>
       ${room.suggestions?.length ? `<div class="meta hint"><ha-icon icon="mdi:lightbulb-on-outline"></ha-icon> ${room.suggestions.length === 1 ? "A suggestion" : `${room.suggestions.length} suggestions`} from how the lights get changed</div>` : ""}
     </div>`;
   }
@@ -458,7 +502,7 @@ class RoomRoutinesPanel extends HTMLElement {
         const own = table[p];
         const editing = this._editLook && this._editLook.room === room.id && this._editLook.period === p && this._editLook.track === track;
         const picking = this._scenePick && this._scenePick.room === room.id && this._scenePick.period === p && this._scenePick.track === track;
-        const now = p === d.house.period && d.house.track === track;
+        const now = p === (room.period || d.house.period) && d.house.track === track;
         let cells;
         if (editing) cells = `<td colspan="${lights.length}">${this._lookEditor(room)}</td>`;
         else if (picking) cells = `<td colspan="${lights.length}">${this._scenePicker(room, own)}</td>`;
@@ -488,7 +532,7 @@ class RoomRoutinesPanel extends HTMLElement {
     </div>`;
     const trackHelp = dim
       ? `<p class="explain">These looks are used on Dark Days${d.house.tracks?.enabled ? ` (in ${esc((d.house.tracks.periods || []).join(", ") || "no periods")}, when the sun is down or the light is below ${esc(d.house.tracks.dark_below_pct)} % of a clear day)` : ", once Dark Days are switched on under Settings → Dark Days"}. ${(d.house.tracks?.brightness_pct ?? 100) !== 100 ? `A period without its own Dark Day look uses its Normal one at ${esc(d.house.tracks.brightness_pct)} % brightness (lights set to their last brightness stay as they are)` : "A period without its own Dark Day look uses its Normal one"}, so only set the ones that should differ.</p>`
-      : `<p class="explain">What the lights do when someone arrives, in each period. A period without its own look uses the one before it. Set the lights how you want them and press <b>Save as now</b>: it becomes a Home Assistant scene you can also use on wall buttons. Or pick a scene you already have, or edit a look by hand.</p>`;
+      : `<p class="explain">What the lights do when the room's routine starts, in each period. A period without its own look uses the one before it. Set the lights how you want them and press <b>Save as now</b>: it becomes a Home Assistant scene you can also use on wall buttons. Or pick a scene you already have, or edit a look by hand.</p>`;
     const s = room.settings;
     return `
       <div class="detailhead">
@@ -501,9 +545,14 @@ class RoomRoutinesPanel extends HTMLElement {
         </div>
         <div class="status">${this._statusLine(room)}</div>
         ${room.reason ? `<div class="meta reason">${esc(room.reason)}</div>` : ""}
-        <div class="meta">${this._luxLine(room)}</div>
-        <div class="chips">${this._sensorDots(room)}</div>
+        ${this._luxLine(room) ? `<div class="meta">${this._luxLine(room)}</div>` : ""}
+        ${this._ownTimesLine(d, room)}
+        ${room.has_sensors ? `<div class="chips">${this._sensorDots(room)}</div>` : ""}
         <div class="chips">${this._lightChips(room)}</div>
+        ${room.mode !== "off" ? `<div class="row">
+          <button class="btn small" data-action="routine-start" data-room="${esc(room.id)}"><ha-icon icon="mdi:play"></ha-icon> Start the routine</button>
+          <button class="btn small" data-action="routine-stop" data-room="${esc(room.id)}"><ha-icon icon="mdi:stop"></ha-icon> Switch off</button>
+        </div>` : ""}
       </div>
       ${this._suggestionsSection(room)}
       <h2>Looks</h2>
@@ -518,10 +567,14 @@ class RoomRoutinesPanel extends HTMLElement {
       ${this._historySection(room)}
       <h2>How this room works</h2>
       <div class="card settings-summary">
-        <div>Switches on when ${s.triggers.map((t) => `<b>${esc(this._name(t))}</b>`).join(" or ")} sees someone${s.threshold_lux != null && s.lux_sensor ? ` and it's darker than <b>${esc(s.threshold_lux)} lx</b>` : ""}.</div>
+        ${s.triggers.length ? `<div>Switches on when ${s.triggers.map((t) => `<b>${esc(this._name(t))}</b>`).join(" or ")} sees someone${s.threshold_lux != null && s.lux_sensor ? ` and it's darker than <b>${esc(s.threshold_lux)} lx</b>` : ""}.</div>` : ""}
         ${s.holds.length ? `<div>Kept on while ${s.holds.map((t) => `<b>${esc(this._name(t))}</b>`).join(" or ")} sees someone.</div>` : ""}
-        <div>Goes dark <b>${esc(s.timeout_s)} s</b> after the room empties, fading out over <b>${esc(s.fade_out_s)} s</b>.</div>
-        <div>After a light is switched off by hand, motion is ignored for <b>${esc(s.cooldown_s)} s</b>.</div>
+        ${room.has_sensors
+          ? `<div>Goes dark <b>${esc(s.timeout_s)} s</b> after the room empties, fading out over <b>${esc(s.fade_out_s)} s</b>.</div>
+        <div>After a light is switched off by hand, motion is ignored for <b>${esc(s.cooldown_s)} s</b>.</div>`
+          : `<div>No sensors: the routine starts from ${(s.timers || []).some((t) => t.action !== "off") ? "its timers, " : ""}${s.on_by_hand === "routine" ? "the lights being switched on another way, " : ""}the <b>Start the routine</b> button or the <code>room_routines.switch_on</code> action, and runs until the lights are switched off.</div>`}
+        <div>Lights switched on another way (a wall switch, an app): <b>${esc(ON_BY_HAND[s.on_by_hand || "leave"])}</b>. A change by hand while the routine runs pauses it until the lights go off.</div>
+        ${(s.timers || []).map((t) => `<div>Timer: ${esc(this._timerText(t))}.</div>`).join("")}
         <div>When the period changes in a lit room, the lights move to the new look over <b>${esc(s.drift_s)} s</b>.</div>
         ${this._admin ? `<div class="row"><button class="btn small" data-action="edit-room" data-room="${esc(room.id)}">Change these settings</button></div>` : ""}
       </div>`;
@@ -783,9 +836,14 @@ class RoomRoutinesPanel extends HTMLElement {
       <h2>Rooms</h2>
       <div class="card">
         ${d.rooms.length ? `<table class="plain">${d.rooms.map((r) => `<tr><td><b>${esc(r.name)}</b><div class="meta">${esc(r.area_name || "No area")} · ${esc(MODE_LABEL[r.mode] || r.mode)} · ${r.settings.lights.length} light${r.settings.lights.length === 1 ? "" : "s"}</div></td>
-          <td class="actions"><button class="btn tiny" data-action="edit-room" data-room="${esc(r.id)}">Change</button> <button class="btn tiny danger" data-action="remove-room" data-room="${esc(r.id)}">Remove</button></td></tr>`).join("")}</table>` : `<div class="meta">No rooms yet.</div>`}
+          <td class="actions"><button class="btn tiny" data-action="edit-room" data-room="${esc(r.id)}">Change</button> <button class="btn tiny danger" data-action="remove-room" data-room="${esc(r.id)}">${r.area_id && r.id.startsWith("area_") ? "Hide" : "Remove"}</button></td></tr>`).join("")}</table>` : `<div class="meta">No rooms yet.</div>`}
         <div class="row"><button class="btn primary small" data-action="add-room">Add a room</button></div>
       </div>
+      ${(d.house.hidden_areas || []).length ? `<h2>Hidden areas</h2>
+      <div class="card">
+        <p class="explain">Areas you removed. They don't come back as rooms until you show them again.</p>
+        <table class="plain">${d.house.hidden_areas.map((a) => `<tr><td>${esc(a.name)}</td><td class="actions"><button class="btn tiny" data-action="unhide-area" data-area="${esc(a.id)}">Show again</button></td></tr>`).join("")}</table>
+      </div>` : ""}
       <h2>Periods</h2>
       <div class="card">
         <div>${d.house.order.map((p) => `<span class="chip" style="--c:${this._periodColour(p)}">${esc(p)} ${esc(d.house.periods.find((x) => x.name === p).start)}</span>`).join(" ")}</div>
@@ -805,9 +863,14 @@ class RoomRoutinesPanel extends HTMLElement {
     if (room) {
       this._roomDraft = { id: room.id, name: room.name, area_id: room.area_id, mode: room.mode, ...JSON.parse(JSON.stringify(room.settings)) };
     } else {
-      this._roomDraft = { id: null, name: "", area_id: null, lights: [], triggers: [], holds: [], lux_sensor: null, self_fading: [], ...ROOM_DEFAULTS };
+      this._roomDraft = { id: null, name: "", area_id: null, lights: [], triggers: [], holds: [], lux_sensor: null, self_fading: [], on_by_hand: "leave", blends: {}, period_starts: {}, timers: [], ...ROOM_DEFAULTS };
     }
-    this._roomDraft.search = {};
+    const r = this._roomDraft;
+    r.on_by_hand = r.on_by_hand || "leave";
+    r.blends = { ...(r.blends || {}) };
+    r.period_starts = { ...(r.period_starts || {}) };
+    r.timers = (r.timers || []).map((t) => ({ ...t, weekdays: [...(t.weekdays || [])], only_home: [...(t.only_home || [])] }));
+    r.search = {};
     this._roomError = null;
   }
 
@@ -834,7 +897,7 @@ class RoomRoutinesPanel extends HTMLElement {
           ${areas.map((a) => `<option value="${esc(a.area_id)}" ${a.area_id === r.area_id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
         </select><span class="help">Used to suggest lights and sensors below, and to show the room's status under that area.</span></label>
         ${this._picker("lights", "Lights", "light", "The lights this room switches.")}
-        ${this._picker("triggers", "Sensors that switch the lights on", "binary_sensor", "Any motion or presence sensor. When one of these sees someone and it's dark enough, the lights come on.")}
+        ${this._picker("triggers", "Sensors that switch the lights on", "binary_sensor", "Optional. Any motion or presence sensor. When one of these sees someone and it's dark enough, the lights come on. A room without sensors runs on timers, a button or the lights being switched on.")}
         ${this._picker("holds", "Sensors that only keep the lights on", "binary_sensor", "Optional. These never switch the lights on, but keep them on while they see someone.")}
         <label>Light-level sensor <select data-room-field="lux_sensor"><option value="">None</option>
           ${luxOptions.map((e) => `<option value="${esc(e)}" ${e === r.lux_sensor ? "selected" : ""}>${esc(this._name(e))}${r.area_id && this._areaOf(e) === r.area_id ? " (in this area)" : ""}</option>`).join("")}
@@ -850,6 +913,7 @@ class RoomRoutinesPanel extends HTMLElement {
           <span class="help">For lights whose own device fades them, such as a DALI gateway set to dim to off over a few seconds. They get a plain on or off.</span><div>
           ${r.lights.map((l) => `<label class="inline"><input type="checkbox" data-self-fading="${esc(l)}" ${r.self_fading.includes(l) ? "checked" : ""}> ${esc(this._name(l))}</label>`).join("")}
         </div></fieldset>` : ""}
+        ${this._routineFields(r)}
         ${r.id ? `<label>Mode <select data-room-field="mode">${Object.entries(MODE_LABEL).map(([k, v]) => `<option value="${k}" ${k === r.mode ? "selected" : ""}>${v}</option>`).join("")}</select>
           <span class="help">${esc(MODE_HELP[r.mode] || "")}</span></label>` : `<p class="help">A new room starts in Log only, with every light on at its last brightness in every period.</p>`}
         <div class="row">
@@ -857,6 +921,61 @@ class RoomRoutinesPanel extends HTMLElement {
           <button class="btn" data-action="room-cancel">Cancel</button>
         </div>
       </div>`;
+  }
+
+  _timerText(t) {
+    const days = t.days === "chosen_days" ? (t.weekdays || []).map((i) => WEEKDAYS[i].slice(0, 3)).join(", ") || "no days" : (TIMER_DAYS[t.days] || "Every day").toLowerCase();
+    const bits = [`${t.action === "off" ? "switch off" : "start the routine"} at ${t.at || "?"}, ${days}`];
+    if (t.only_dark) bits.push("only when it's dark");
+    if ((t.only_home || []).length) bits.push(`only if ${t.only_home.map((p) => this._name(p)).join(" or ")} is home`);
+    return bits.join(", ");
+  }
+
+  // The time-based half of a room: its own period times, blending, lights
+  // switched on another way, and timers.
+  _routineFields(r) {
+    const d = this._data;
+    const order = d?.house?.order || [];
+    const people = d?.house?.people || [];
+    const houseStart = (p) => d.house.periods.find((x) => x.name === p)?.start || "";
+    const timers = r.timers
+      .map((t, i) => `<div class="timer">
+        <select data-timer="${i}" data-field="action" aria-label="What">
+          <option value="on" ${t.action !== "off" ? "selected" : ""}>Start the routine</option>
+          <option value="off" ${t.action === "off" ? "selected" : ""}>Switch off</option>
+        </select>
+        at <input type="time" value="${esc(t.at || "")}" data-timer="${i}" data-field="at" aria-label="At">
+        <select data-timer="${i}" data-field="days" aria-label="Days">
+          ${Object.entries(TIMER_DAYS).map(([k, v]) => `<option value="${k}" ${k === (t.days || "every_day") ? "selected" : ""}>${v}</option>`).join("")}
+        </select>
+        <button class="btn tiny danger" data-action="timer-remove" data-row="${i}">Remove</button>
+        ${t.days === "chosen_days" ? `<div>${WEEKDAYS.map((w, j) => `<label class="inline"><input type="checkbox" data-timer-day="${i}" data-day="${j}" ${(t.weekdays || []).includes(j) ? "checked" : ""}> ${w.slice(0, 3)}</label>`).join("")}</div>` : ""}
+        <div><label class="inline"><input type="checkbox" data-timer-check="${i}" data-field="only_dark" ${t.only_dark ? "checked" : ""}> Only when it's dark (the sun is down or it's a Dark Day)</label></div>
+        ${people.length ? `<div>Only if one of these is home: ${people.map((p) => `<label class="inline"><input type="checkbox" data-timer-person="${i}" data-person="${esc(p)}" ${(t.only_home || []).includes(p) ? "checked" : ""}> ${esc(this._name(p))}</label>`).join("")}</div>` : ""}
+      </div>`)
+      .join("");
+    const workday = d?.house?.workday_sensor
+      ? `Workdays come from ${esc(this._name(d.house.workday_sensor))}.`
+      : "Workdays are Monday to Friday; add Home Assistant's Workday integration to skip public holidays.";
+    return `<fieldset><legend>Following the day</legend>
+      <span class="help">For rooms that should follow the clock rather than (or as well as) motion: an office, a living room.</span>
+      <label>When the lights are switched on another way <select data-room-field="on_by_hand">
+        ${Object.entries(ON_BY_HAND).map(([k, v]) => `<option value="${k}" ${k === r.on_by_hand ? "selected" : ""}>${v}</option>`).join("")}
+      </select><span class="help">A wall switch or another app. Starting the routine gives the lights the period's look and then follows the day. However it started, changing a light by hand pauses the routine until the lights are switched off.</span></label>
+      <table class="plain periods">
+        <tr><th>Period</th><th>This room's start</th><th>Blend into the next period over</th></tr>
+        ${order.map((p) => `<tr>
+          <td><span class="dot" style="background:${this._periodColour(p)}"></span>${esc(p)}</td>
+          <td><input type="time" value="${esc(r.period_starts[p] || "")}" data-own-start="${esc(p)}" aria-label="${esc(p)} starts in this room"> <small class="muted">house: ${esc(houseStart(p))}</small></td>
+          <td><span class="inputunit"><input type="number" min="0" max="1440" step="5" value="${esc(r.blends[p] || "")}" data-blend="${esc(p)}" placeholder="0" aria-label="Blend minutes"> min</span></td>
+        </tr>`).join("")}
+      </table>
+      <span class="help">Leave a start empty to use the house's time; set one to move a period for this room only (an office's Evening after the working day). Blending moves brightness and colour gradually from one period's look to the next's over the minutes before it starts, while the routine runs (looks that set a level and colour; a look of last brightness or a scene from another app doesn't blend).</span>
+      <h3>Timers</h3>
+      ${timers || `<div class="meta">None.</div>`}
+      <div class="row"><button class="btn small" data-action="timer-add">Add a timer</button></div>
+      <span class="help">${workday} A timer that starts the routine in an empty room still switches off with the room's sensors, if it has any; without sensors it stays on until switched off.</span>
+    </fieldset>`;
   }
 
   // A searchable list of entities of one domain. The area's own are suggested
@@ -1091,6 +1210,46 @@ class RoomRoutinesPanel extends HTMLElement {
         this._roomDraft[key] = this._roomDraft[key].filter((e) => e !== el.dataset.entity);
         if (key === "lights") this._roomDraft.self_fading = this._roomDraft.self_fading.filter((e) => e !== el.dataset.entity);
         this._render();
+      })
+    );
+    root.querySelectorAll("[data-own-start]").forEach((el) =>
+      el.addEventListener("change", () => {
+        if (el.value) this._roomDraft.period_starts[el.dataset.ownStart] = el.value;
+        else delete this._roomDraft.period_starts[el.dataset.ownStart];
+      })
+    );
+    root.querySelectorAll("[data-blend]").forEach((el) =>
+      el.addEventListener("change", () => {
+        const m = Number(el.value);
+        if (m > 0) this._roomDraft.blends[el.dataset.blend] = m;
+        else delete this._roomDraft.blends[el.dataset.blend];
+      })
+    );
+    root.querySelectorAll("[data-timer]").forEach((el) =>
+      el.addEventListener("change", () => {
+        this._roomDraft.timers[Number(el.dataset.timer)][el.dataset.field] = el.value;
+        if (el.dataset.field === "days") this._render();
+      })
+    );
+    root.querySelectorAll("[data-timer-check]").forEach((el) =>
+      el.addEventListener("change", () => {
+        this._roomDraft.timers[Number(el.dataset.timerCheck)][el.dataset.field] = el.checked;
+      })
+    );
+    root.querySelectorAll("[data-timer-day]").forEach((el) =>
+      el.addEventListener("change", () => {
+        const t = this._roomDraft.timers[Number(el.dataset.timerDay)];
+        const j = Number(el.dataset.day);
+        t.weekdays = (t.weekdays || []).filter((x) => x !== j);
+        if (el.checked) t.weekdays.push(j);
+        t.weekdays.sort();
+      })
+    );
+    root.querySelectorAll("[data-timer-person]").forEach((el) =>
+      el.addEventListener("change", () => {
+        const t = this._roomDraft.timers[Number(el.dataset.timerPerson)];
+        t.only_home = (t.only_home || []).filter((x) => x !== el.dataset.person);
+        if (el.checked) t.only_home.push(el.dataset.person);
       })
     );
     root.querySelectorAll("[data-self-fading]").forEach((el) =>
@@ -1372,8 +1531,29 @@ class RoomRoutinesPanel extends HTMLElement {
         this._render();
         return;
       case "remove-room": {
-        if (!confirm(`Remove ${room.name}? Its looks and settings go with it. The lights and sensors themselves are untouched.`)) return;
+        const hide = room.area_id && room.id.startsWith("area_");
+        if (!confirm(hide
+          ? `Hide ${room.name}? Its looks and settings go, and the area doesn't come back as a room until you show it again under Hidden areas. The lights themselves are untouched.`
+          : `Remove ${room.name}? Its looks and settings go with it. The lights and sensors themselves are untouched.${room.area_id ? " Its area is hidden, so it doesn't come back as a room by itself." : ""}`)) return;
         const res = await this._ws({ type: "room_routines/remove_room", room_id: room.id }, `Removed ${room.name}.`);
+        if (!res.ok) this._notice = { text: res.error, bad: true };
+        this._render();
+        return;
+      }
+      case "timer-add":
+        this._roomDraft.timers.push({ at: "", action: "on", days: "every_day", weekdays: [], only_dark: false, only_home: [] });
+        this._render();
+        return;
+      case "timer-remove":
+        this._roomDraft.timers.splice(Number(el.dataset.row), 1);
+        this._render();
+        return;
+      case "routine-start":
+      case "routine-stop":
+        await this._call("room_routines", action === "routine-start" ? "switch_on" : "switch_off", { entity_id: room.status_entity });
+        return;
+      case "unhide-area": {
+        const res = await this._ws({ type: "room_routines/unhide_area", area_id: el.dataset.area }, "Shown again: it comes back as a room, switched off.");
         if (!res.ok) this._notice = { text: res.error, bad: true };
         this._render();
         return;
@@ -1397,7 +1577,22 @@ class RoomRoutinesPanel extends HTMLElement {
           cooldown_s: r.cooldown_s ?? ROOM_DEFAULTS.cooldown_s,
           drift_s: r.drift_s ?? ROOM_DEFAULTS.drift_s,
           self_fading: r.self_fading.filter((l) => r.lights.includes(l)),
+          on_by_hand: r.on_by_hand || "leave",
+          blends: r.blends,
+          period_starts: r.period_starts,
+          timers: r.timers.map((t) => {
+            const out = { at: t.at || "", action: t.action || "on", days: t.days || "every_day" };
+            if (out.days === "chosen_days") out.weekdays = t.weekdays || [];
+            if (t.only_dark) out.only_dark = true;
+            if ((t.only_home || []).length) out.only_home = t.only_home;
+            return out;
+          }),
         };
+        if (body.timers.some((t) => !t.at)) {
+          this._roomError = "Every timer needs a time.";
+          this._render();
+          return;
+        }
         const msg = { type: "room_routines/save_room", room: body };
         if (r.id) msg.room_id = r.id;
         const res = await this._ws(msg, r.id ? `Saved ${body.name}.` : `Added ${body.name}. It starts in Log only.`);
@@ -1515,6 +1710,13 @@ const STYLES = `
   .pill.mode-live { background: color-mix(in srgb, var(--success-color, #43a047) 20%, var(--card-background-color)); border-color: var(--success-color, #43a047); }
   .pill.mode-log_only { background: color-mix(in srgb, var(--info-color, #039be5) 18%, var(--card-background-color)); border-color: var(--info-color, #039be5); }
   .pill.mode-off { opacity:.7; }
+  .offrooms { margin-top:12px; }
+  .offrooms summary { cursor:pointer; color: var(--secondary-text-color); font-size:14px; padding:8px 0; }
+  .openrow { cursor:pointer; }
+  .openrow:hover td, .openrow:focus-visible td { background: var(--secondary-background-color); }
+  .timer { border-top:1px solid var(--divider-color); padding:8px 0; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+  .timer > div { flex-basis:100%; }
+  ha-icon.small { --mdc-icon-size:16px; }
   .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
   .swatch { display:inline-block; width:12px; height:12px; border-radius:3px; vertical-align:middle; border:1px solid var(--divider-color); }
   .warntext { color: var(--warning-color, #ffa600); }

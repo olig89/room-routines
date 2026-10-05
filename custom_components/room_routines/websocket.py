@@ -36,7 +36,16 @@ from .core.parity import any_on, compare, edges, windows, within
 from .core.serial import look_to, schedule_to, target_to, tracks_to
 from .core.tracks import DIM, NORMAL, TRACK_LABELS, TRACKS
 from .house import House, RoomRunner, capture, scene_entities
-from .settings import SettingsError, add_room, remove_room, set_look, set_periods, set_tracks, update_room
+from .settings import (
+    SettingsError,
+    add_room,
+    remove_room,
+    set_look,
+    set_periods,
+    set_tracks,
+    unhide_area,
+    update_room,
+)
 
 HISTORY_MAX_HOURS = 24 * 14
 
@@ -46,6 +55,7 @@ def async_register_websocket(hass: HomeAssistant) -> None:
         ws_subscribe,
         ws_save_look,
         ws_save_room,
+        ws_unhide_area,
         ws_remove_room,
         ws_save_periods,
         ws_save_tracks,
@@ -110,6 +120,7 @@ def room_snapshot(hass: HomeAssistant, runner: RoomRunner) -> dict[str, Any]:
     ambient = room.ambient.ambient(now) if room else None
     area = ar.async_get(hass).async_get_area(runner.area_id) if runner.area_id else None
     source = room.source() if room else None
+    blending = room.blending(now) if room and room.state.value == "owned" and not room.paused else None
     return {
         "id": runner.room_id,
         "name": runner.config.name,
@@ -130,6 +141,14 @@ def room_snapshot(hass: HomeAssistant, runner: RoomRunner) -> dict[str, Any]:
         "look_track": source.track if source else NORMAL,
         "look_factor": room.dim_factor() if room else 1.0,
         "current_look": look_to(source.look) if source else None,
+        "period": room.period if room else house.period,
+        "next_change": _iso(runner.next_change()),
+        "own_times": bool(runner.config.period_starts),
+        "has_sensors": runner.config.has_sensors,
+        "paused": room.paused if room else False,
+        "blending": (
+            {"fraction": round(blending[0], 3), "into": blending[1]} if blending else None
+        ),
         # What is stored, so the settings page edits exactly that.
         "settings": {
             "lights": list(stored.get("lights") or []),
@@ -142,6 +161,10 @@ def room_snapshot(hass: HomeAssistant, runner: RoomRunner) -> dict[str, Any]:
             "cooldown_s": stored.get("cooldown_s"),
             "drift_s": stored.get("drift_s"),
             "self_fading": list(stored.get("self_fading") or []),
+            "on_by_hand": stored.get("on_by_hand") or "leave",
+            "blends": dict(stored.get("blends") or {}),
+            "period_starts": dict(stored.get("period_starts") or {}),
+            "timers": list(stored.get("timers") or []),
         },
         "looks": dict(stored.get("looks") or {}),
         "dim_looks": dict(stored.get("dim_looks") or {}),
@@ -175,6 +198,12 @@ def snapshot(hass: HomeAssistant) -> dict[str, Any]:
             "track_entity": house.track_entity_id,
             "track_by_hand": house.chooser.by_hand,
             "tracks": {**tracks_to(house.tracks), **house.dark_day_status()},
+            "hidden_areas": [
+                {"id": area_id, "name": (a.name if (a := ar.async_get(hass).async_get_area(area_id)) else area_id)}
+                for area_id in house.options.get("hidden_areas") or []
+            ],
+            "people": sorted(state.entity_id for state in hass.states.async_all("person")),
+            "workday_sensor": house.workday_sensor(),
         },
         "rooms": [room_snapshot(hass, runner) for runner in house.rooms.values()],
     }
@@ -343,7 +372,7 @@ ROOM_FIELDS = vol.Schema(
         vol.Required("name"): str,
         vol.Optional("area_id"): vol.Any(None, str),
         vol.Required("lights"): [str],
-        vol.Required("triggers"): [str],
+        vol.Optional("triggers", default=list): [str],
         vol.Optional("holds", default=list): [str],
         vol.Optional("lux_sensor"): vol.Any(None, str),
         vol.Optional("threshold_lux"): vol.Any(None, vol.Coerce(float)),
@@ -352,6 +381,10 @@ ROOM_FIELDS = vol.Schema(
         vol.Required("cooldown_s"): vol.All(vol.Coerce(int), vol.Range(min=0, max=600)),
         vol.Required("drift_s"): vol.All(vol.Coerce(int), vol.Range(min=0, max=600)),
         vol.Optional("self_fading", default=list): [str],
+        vol.Optional("on_by_hand"): vol.In(["leave", "routine"]),
+        vol.Optional("blends"): {str: vol.All(vol.Coerce(int), vol.Range(min=0, max=1440))},
+        vol.Optional("period_starts"): {str: vol.Any(None, str)},
+        vol.Optional("timers"): [dict],
     }
 )
 
@@ -380,6 +413,19 @@ def ws_save_room(hass: HomeAssistant, connection: websocket_api.ActiveConnection
         return
     _save(hass, house, options)
     connection.send_result(msg["id"], {"room_id": room_id})
+
+
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/unhide_area", vol.Required("area_id"): str})
+@websocket_api.require_admin
+@callback
+def ws_unhide_area(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Bring a hidden area back as a room (it is added again on the reload)."""
+    house = _house(hass)
+    if house is None:
+        connection.send_error(msg["id"], "not_set_up", "Room Routines isn't set up")
+        return
+    _save(hass, house, unhide_area(house.entry.options, msg["area_id"]))
+    connection.send_result(msg["id"], {})
 
 
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/remove_room", vol.Required("room_id"): str})

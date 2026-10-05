@@ -33,3 +33,21 @@ set_look:
       selector:
         entity:
           domain: scene
+switch_on:
+  fields:
+    entity_id:
+      required: true
+      selector:
+        entity:
+          integration: room_routines
+          domain: sensor
+          multiple: true
+switch_off:
+  fields:
+    entity_id:
+      required: true
+      selector:
+        entity:
+          integration: room_routines
+          domain: sensor
+          multiple: true

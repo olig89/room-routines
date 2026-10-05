@@ -8,7 +8,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from . import RoomRoutinesConfigEntry
-from .const import MODE_LOG_ONLY, MODES
+from .const import MODES
 from .core.tracks import TRACKS
 from .entity import HouseEntity, RoomEntity
 
@@ -112,7 +112,7 @@ class RoomModeSelect(RoomEntity, SelectEntity, RestoreEntity):
         await super().async_added_to_hass()
         self.runner.mode_entity_id = self.entity_id
         last = await self.async_get_last_state()
-        self.runner.set_mode(last.state if last and last.state in MODES else MODE_LOG_ONLY)
+        self.runner.set_mode(last.state if last and last.state in MODES else self.runner.start_mode)
 
     @property
     def current_option(self) -> str:

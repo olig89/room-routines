@@ -12,18 +12,31 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import ATTR_ENTITY_ID, Platform
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.const import ATTR_ENTITY_ID, EVENT_HOMEASSISTANT_STARTED, Platform
+from homeassistant.core import CoreState, Event, HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.typing import ConfigType
 
-from .const import ANY_SIGNAL, DOMAIN, NAME, PANEL_COMPONENT, PANEL_URL, SERVICE_SET_LOOK, STATIC_URL, clean_options
+from .const import (
+    ANY_SIGNAL,
+    DOMAIN,
+    NAME,
+    PANEL_COMPONENT,
+    PANEL_URL,
+    SERVICE_SET_LOOK,
+    SERVICE_SWITCH_OFF,
+    SERVICE_SWITCH_ON,
+    STATIC_URL,
+    clean_options,
+)
 from .core.serial import look_to
 from .core.tracks import NORMAL, TRACKS
 from .house import House, capture, room_of
-from .settings import LOOK_KEYS
+from .settings import LOOK_KEYS, add_area_rooms
 from .websocket import async_register_websocket
 
 PLATFORMS = [Platform.SELECT, Platform.SENSOR, Platform.SWITCH]
@@ -107,7 +120,62 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         hass.config_entries.async_update_entry(house.entry, options=options)
 
     hass.services.async_register(DOMAIN, SERVICE_SET_LOOK, set_look, schema=SET_LOOK_SCHEMA)
+
+    def _runners(call: ServiceCall):
+        found = []
+        for entity_id in call.data[ATTR_ENTITY_ID]:
+            room = room_of(hass, entity_id)
+            if room is None:
+                raise ServiceValidationError(f"{entity_id} is not a Room Routines room status sensor")
+            found.append(room[1])
+        return found
+
+    async def switch_on(call: ServiceCall) -> None:
+        """Start the routine: the current look, then following the day (a wall button)."""
+        for runner in _runners(call):
+            runner.start_routine("switched on by an action")
+
+    async def switch_off(call: ServiceCall) -> None:
+        for runner in _runners(call):
+            runner.stop_routine("switched off by an action")
+
+    schema = vol.Schema({vol.Required(ATTR_ENTITY_ID): cv.entity_ids})
+    hass.services.async_register(DOMAIN, SERVICE_SWITCH_ON, switch_on, schema=schema)
+    hass.services.async_register(DOMAIN, SERVICE_SWITCH_OFF, switch_off, schema=schema)
     return True
+
+
+def _area_lights(hass: HomeAssistant) -> dict[str, tuple[str, list[str]]]:
+    """Every area's lights: not disabled, not hidden, and not a group of other lights."""
+    areas = ar.async_get(hass)
+    devices = dr.async_get(hass)
+    found: dict[str, tuple[str, list[str]]] = {
+        area.id: (area.name, []) for area in areas.async_list_areas()
+    }
+    for entity in er.async_get(hass).entities.values():
+        if entity.domain != "light" or entity.disabled_by or entity.hidden_by:
+            continue
+        if entity.platform == "group":
+            continue
+        state = hass.states.get(entity.entity_id)
+        if state is not None and state.attributes.get("entity_id"):
+            continue  # a Hue room/zone or other group that lists its member lights
+        area_id = entity.area_id
+        if area_id is None and entity.device_id:
+            device = devices.async_get(entity.device_id)
+            area_id = device.area_id if device else None
+        if area_id in found:
+            found[area_id][1].append(entity.entity_id)
+    return found
+
+
+@callback
+def _add_area_rooms(hass: HomeAssistant, entry: RoomRoutinesConfigEntry) -> None:
+    """Make every area with lights a room (they start off). Saving the options
+    reloads the integration with them."""
+    options = add_area_rooms(entry.options, _area_lights(hass))
+    if options is not None:
+        hass.config_entries.async_update_entry(entry, options=options)
 
 
 def _remove_old_rooms(hass: HomeAssistant, entry: RoomRoutinesConfigEntry, house: House) -> None:
@@ -132,6 +200,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: RoomRoutinesConfigEntry)
     house.start()
     entry.async_on_unload(house.stop)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+    # Rooms for new areas: once everything has started, so the lights' groups are known.
+    if hass.state is CoreState.running:
+        _add_area_rooms(hass, entry)
+    else:
+
+        @callback
+        def _started(_event: Event) -> None:
+            _add_area_rooms(hass, entry)
+
+        entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _started))
     await _async_register_panel(hass)
     async_dispatcher_send(hass, ANY_SIGNAL)
     return True

@@ -208,6 +208,26 @@
           "description": "The scene to turn on, for look 'scene'."
         }
       }
+    },
+    "switch_on": {
+      "name": "Start a room's routine",
+      "description": "Switches the room's lights on to the current period's look and keeps them following the day (its own times, blending) until they are switched off. For a wall button.",
+      "fields": {
+        "entity_id": {
+          "name": "Room",
+          "description": "The room's status sensor (one or more)."
+        }
+      }
+    },
+    "switch_off": {
+      "name": "Switch a room's lights off",
+      "description": "Switches the room's lights off, however they were switched on.",
+      "fields": {
+        "entity_id": {
+          "name": "Room",
+          "description": "The room's status sensor (one or more)."
+        }
+      }
     }
   }
 }

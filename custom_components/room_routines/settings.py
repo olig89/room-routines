@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from .const import CONF_ALT_DAYS, CONF_PERIODS, CONF_ROOMS, CONF_TRACKS, clean_options
+from .const import CONF_ALT_DAYS, CONF_HIDDEN_AREAS, CONF_PERIODS, CONF_ROOMS, CONF_TRACKS, clean_options
 from .core.serial import first_look, look_from, look_to, room_from, schedule_from, tracks_from, tracks_to
 from .core.tracks import DIM, NORMAL, TRACKS
 
@@ -60,9 +60,20 @@ def clean_room(user_input: Mapping[str, Any], previous: Mapping[str, Any] | None
     )
     # Only the room's own lights can be marked as fading by themselves.
     room["self_fading"] = [light for light in user_input.get("self_fading") or [] if light in room["lights"]]
+    # Time-based routines (all optional: a room with none of them is a motion room).
+    room["on_by_hand"] = user_input.get("on_by_hand", room.get("on_by_hand")) or "leave"
+    room["blends"] = {
+        str(p): int(m) for p, m in (user_input.get("blends", room.get("blends")) or {}).items() if m
+    }
+    room["period_starts"] = {
+        str(p): str(t)[:5] for p, t in (user_input.get("period_starts", room.get("period_starts")) or {}).items() if t
+    }
+    room["timers"] = [dict(t) for t in user_input.get("timers", room.get("timers")) or []]
     if not room["name"]:
         raise SettingsError("no_name")
-    if not room["lights"] or not room["triggers"]:
+    # A room needs lights; sensors are optional (a room can run on timers, buttons
+    # or lights switched on by hand).
+    if not room["lights"]:
         raise SettingsError("invalid_room")
     # Looks may only mention the room's lights.
     kept = set(room["lights"])
@@ -77,10 +88,19 @@ def clean_room(user_input: Mapping[str, Any], previous: Mapping[str, Any] | None
     return room
 
 
+def _check_times(options: Mapping[str, Any], room: Mapping[str, Any]) -> None:
+    """A room's own period times must still give every period its own start."""
+    try:
+        schedule_from(options).with_starts(room_from(room).period_starts)
+    except ValueError as err:
+        raise SettingsError("invalid_room_times") from err
+
+
 def add_room(options: Mapping[str, Any], data: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
     """A new room, starting with every light on at its last brightness."""
     out = _options(options)
     room = clean_room(data, None)
+    _check_times(out, room)
     room["looks"] = first_look(room["lights"], schedule_from(out))
     room_id = uuid.uuid4().hex[:8]
     out[CONF_ROOMS][room_id] = room
@@ -90,15 +110,57 @@ def add_room(options: Mapping[str, Any], data: Mapping[str, Any]) -> tuple[dict[
 def update_room(options: Mapping[str, Any], room_id: str, data: Mapping[str, Any]) -> dict[str, Any]:
     out = _options(options)
     previous = _room(out, room_id)
-    out[CONF_ROOMS][room_id] = clean_room({**previous, **data}, previous)
+    room = clean_room({**previous, **data}, previous)
+    _check_times(out, room)
+    out[CONF_ROOMS][room_id] = room
     return out
 
 
 def remove_room(options: Mapping[str, Any], room_id: str) -> dict[str, Any]:
     out = _options(options)
-    _room(out, room_id)
+    area_id = _room(out, room_id).get("area_id")
     del out[CONF_ROOMS][room_id]
+    # A room made from an area would come straight back: hide the area instead.
+    if area_id and not any(r.get("area_id") == area_id for r in out[CONF_ROOMS].values()):
+        hidden = set(out.get(CONF_HIDDEN_AREAS) or [])
+        hidden.add(area_id)
+        out[CONF_HIDDEN_AREAS] = sorted(hidden)
     return out
+
+
+def unhide_area(options: Mapping[str, Any], area_id: str) -> dict[str, Any]:
+    out = _options(options)
+    out[CONF_HIDDEN_AREAS] = [a for a in out.get(CONF_HIDDEN_AREAS) or [] if a != area_id]
+    return out
+
+
+def add_area_rooms(options: Mapping[str, Any], areas: Mapping[str, tuple[str, list[str]]]) -> dict[str, Any] | None:
+    """A room for every area with lights that isn't a room yet and isn't hidden.
+
+    ``areas`` maps an area id to (its name, its lights). New rooms start off,
+    with no sensors, so nothing changes until someone gives them something to
+    do. Returns None when there is nothing to add.
+    """
+    out = _options(options)
+    taken = {r.get("area_id") for r in out[CONF_ROOMS].values()}
+    hidden = set(out.get(CONF_HIDDEN_AREAS) or [])
+    added = False
+    for area_id, (name, lights) in sorted(areas.items(), key=lambda a: a[1][0]):
+        if area_id in taken or area_id in hidden or not lights:
+            continue
+        room = clean_room(
+            {
+                "name": name, "area_id": area_id, "lights": sorted(lights),
+                "timeout_s": 300, "fade_out_s": 15, "cooldown_s": 30, "drift_s": 90,
+                "threshold_lux": None,
+            },
+            None,
+        )
+        room["looks"] = first_look(room["lights"], schedule_from(out))
+        room["start_mode"] = "off"
+        out[CONF_ROOMS][f"area_{area_id}"] = room
+        added = True
+    return out if added else None
 
 
 # ---- periods -------------------------------------------------------------------
@@ -147,6 +209,15 @@ def set_periods(
                 if target and target in names:
                     looks[target] = look
             room[key] = looks
+        # A room's own times and blends follow the period too.
+        for key in ("blends", "period_starts"):
+            if room.get(key):
+                moved = {}
+                for period, value in room[key].items():
+                    target = renames.get(period, period)
+                    if target and target in names:
+                        moved[target] = value
+                room[key] = moved
     tracks = out.get(CONF_TRACKS)
     if tracks and tracks.get("periods") is not None:
         # The Dark Day periods follow renames too (a removed one drops out).

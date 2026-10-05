@@ -78,7 +78,10 @@ from .core.room import (
 from .core.serial import room_from, schedule_from, tracks_from
 from .core.daylight import MIN_ELEVATION, DaylightReference
 from .core.sun import SunPosition, clear_sky, position
-from .core.tracks import WEATHER_STALE, TrackChooser, default_periods
+from .core.room import BLEND_STEP
+from .core.timers import ON as TIMER_ON
+from .core.timers import Timer, Today, describe, due
+from .core.tracks import DIM, WEATHER_STALE, TrackChooser, default_periods
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -111,6 +114,7 @@ class RoomSetup:
     # Lights whose own device fades them (e.g. a DALI gateway with a switch-off
     # fade time): they get plain commands, never steps.
     self_fading: frozenset[str] = frozenset()
+    start_mode: str = MODE_LOG_ONLY  # a new room's mode until its select remembers one
 
 
 class RoomRunner:
@@ -122,7 +126,10 @@ class RoomRunner:
         self.area_id = setup.area_id
         self.lux_sensor = setup.lux_sensor
         self.self_fading = setup.self_fading
-        self.mode = MODE_LOG_ONLY  # the mode select restores the real value on start-up
+        self.start_mode = setup.start_mode
+        self.mode = setup.start_mode  # the mode select restores the real value on start-up
+        # The room's own clock: the house's periods, with any start times of its own.
+        self.schedule = house.schedule.with_starts(dict(self.config.period_starts))
         self.matcher = OwnChangeMatcher()
         self.room: Room | None = None
         self.status_entity_id: str | None = None
@@ -135,6 +142,7 @@ class RoomRunner:
         # at the dimmed level the fade left it at.
         self._before_fade: dict[str, float] = {}
         self._pending_change: CALLBACK_TYPE | None = None
+        self._own_period: CALLBACK_TYPE | None = None
         self._warned_scenes: set[str] = set()
 
     # -- life cycle --
@@ -143,7 +151,18 @@ class RoomRunner:
     def start(self) -> None:
         self._build()
         sensors = list(self.config.triggers) + list(self.config.holds)
-        self._unsubs.append(async_track_state_change_event(self.hass, sensors, self._on_sensor))
+        if sensors:
+            self._unsubs.append(async_track_state_change_event(self.hass, sensors, self._on_sensor))
+        if self.config.period_starts:
+            self._schedule_own_period()
+        if self.config.blends:
+            self._unsubs.append(async_track_time_interval(self.hass, self._blend_tick, BLEND_STEP))
+        for timer in self.config.timers:
+            self._unsubs.append(
+                async_track_time_change(
+                    self.hass, self._timer_callback(timer), hour=timer.at.hour, minute=timer.at.minute, second=0
+                )
+            )
         self._unsubs.append(async_track_state_change_event(self.hass, list(self.config.lights), self._on_light))
         if self.lux_sensor:
             self._unsubs.append(async_track_state_change_event(self.hass, [self.lux_sensor], self._on_lux))
@@ -158,6 +177,9 @@ class RoomRunner:
         if self._wake:
             self._wake()
             self._wake = None
+        if self._own_period:
+            self._own_period()
+            self._own_period = None
         if self._pending_change:
             self._pending_change()
             self._pending_change = None
@@ -173,8 +195,9 @@ class RoomRunner:
         now = dt_util.now()
         lights_on = self.mode == MODE_LIVE and self._any_on()
         self.room = Room(
-            self.config, self.house.schedule, self.house.period, lights_on, now,
+            self.config, self.schedule, self.period_now(now), lights_on, now,
             stealth=self.house.stealth, track=self.house.track, auto_dim=self.house.tracks.factor,
+            scene_reader=self._read_scene,
         )
         for sensor in (*self.config.triggers, *self.config.holds):
             state = self.hass.states.get(sensor)
@@ -188,6 +211,11 @@ class RoomRunner:
             return
         self.mode = mode
         self._build()
+        if self.config.period_starts:
+            self._schedule_own_period()
+
+    def _read_scene(self, scene: str):
+        return scene_lights(self.hass, scene, self.config.switchable())
 
     @callback
     def update_config(self, config: RoomConfig) -> None:
@@ -250,6 +278,73 @@ class RoomRunner:
         self.room.lux(value, now)
 
     # -- from the house --
+
+    def period_now(self, now: datetime) -> str:
+        """The room's period: its own times, unless the house's was chosen by hand."""
+        if self.house.overridden or not self.config.period_starts:
+            return self.house.period
+        return self.schedule.current(now).name
+
+    def _schedule_own_period(self) -> None:
+        if self._own_period:
+            self._own_period()
+        at = self.schedule.current(dt_util.now())
+        self._own_period = async_track_point_in_time(self.hass, self._own_period_tick, at.next_start)
+
+    @callback
+    def _own_period_tick(self, _now: datetime) -> None:
+        self._own_period = None
+        self._schedule_own_period()
+        self.sync_period()
+
+    @callback
+    def sync_period(self) -> None:
+        """Bring the room to the period it should be in now."""
+        if self.room is None:
+            return
+        period = self.period_now(dt_util.now())
+        if period != self.room.period:
+            self.period_changed(period)
+
+    def next_change(self) -> datetime | None:
+        if self.house.overridden or not self.config.period_starts:
+            return self.house.next_start
+        return self.schedule.current(dt_util.now()).next_start
+
+    @callback
+    def _blend_tick(self, now: datetime) -> None:
+        if self.room is None or self.mode == MODE_OFF:
+            return
+        self._run(self.room.blend_tick(dt_util.now()))
+
+    def _timer_callback(self, timer: Timer):
+        @callback
+        def _fire(_now: datetime) -> None:
+            if self.room is None or self.mode == MODE_OFF:
+                return
+            now = dt_util.now()
+            ok, why = due(timer, self.house.today(now, timer.only_home))
+            what = f"timer {describe(timer)}"
+            if not ok:
+                self.hass.async_create_task(self._log(f"{what}: skipped, {why}"))
+                return
+            if timer.action == TIMER_ON:
+                self._run(self.room.start(now, what))
+            else:
+                self._run(self.room.stop(now, what))
+
+        return _fire
+
+    @callback
+    def start_routine(self, why: str) -> None:
+        """Start the routine now (the switch_on action)."""
+        if self.room is not None and self.mode != MODE_OFF:
+            self._run(self.room.start(dt_util.now(), why))
+
+    @callback
+    def stop_routine(self, why: str) -> None:
+        if self.room is not None and self.mode != MODE_OFF:
+            self._run(self.room.stop(dt_util.now(), why))
 
     @callback
     def period_changed(self, period: str) -> None:
@@ -348,7 +443,7 @@ class RoomRunner:
 
     def look_of(self, period: str, track: str) -> Look | None:
         """A period's look as lights, for comparing with hand changes (None if unreadable)."""
-        source = resolve(period, track, self.config.looks, self.config.dim_looks, self.house.schedule)
+        source = resolve(period, track, self.config.looks, self.config.dim_looks, self.schedule)
         look = source.look
         if look.scene:
             lights = scene_lights(self.hass, look.scene, self.config.switchable())
@@ -594,6 +689,7 @@ def rooms_from(options: Mapping[str, Any]) -> dict[str, RoomSetup]:
         rooms[room_id] = RoomSetup(
             room_id, room_from(data), data.get("area_id"), data.get("lux_sensor"),
             frozenset(data.get("self_fading") or ()),
+            data.get("start_mode") if data.get("start_mode") in (MODE_OFF, MODE_LOG_ONLY, MODE_LIVE) else MODE_LOG_ONLY,
         )
     return rooms
 
@@ -688,6 +784,25 @@ class House:
 
     def sun(self, now: datetime) -> SunPosition:
         return position(self.hass.config.latitude, self.hass.config.longitude, now)
+
+    def workday_sensor(self) -> str | None:
+        """Home Assistant's Workday sensor, if there is one (public holidays count as days off)."""
+        for state in self.hass.states.async_all("binary_sensor"):
+            if state.entity_id.startswith("binary_sensor.workday"):
+                return state.entity_id
+        return None
+
+    def today(self, now: datetime, people: tuple[str, ...] = ()) -> Today:
+        """What a timer needs to know about today."""
+        sensor = self.workday_sensor()
+        state = self.hass.states.get(sensor) if sensor else None
+        workday = None if state is None or state.state not in ("on", "off") else state.state == "on"
+        dark = self.track == DIM or self.sun(now).elevation < MIN_ELEVATION
+        home = {}
+        for person in people:
+            person_state = self.hass.states.get(person)
+            home[person] = person_state is not None and person_state.state == "home"
+        return Today(now.date(), workday, dark, home)
 
     def _start_tracks(self) -> None:
         now = dt_util.now()
@@ -948,8 +1063,10 @@ class House:
     def _set_period(self, name: str) -> None:
         if name != self.period:
             self.period = name
-            for runner in self.rooms.values():
-                runner.period_changed(name)
+        # Every room re-checks: a room with its own times may still be in its old
+        # period, or go back to its own once a period chosen by hand ends.
+        for runner in self.rooms.values():
+            runner.sync_period()
         self._announce()
 
     @callback

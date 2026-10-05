@@ -76,6 +76,16 @@ class Schedule:
         next_start, next_period = min((s for s in ahead if s[0] > now), key=lambda s: s[0])
         return PeriodAt(period.name, started, next_period.name, next_start)
 
+    def with_starts(self, starts: dict[str, time] | None) -> Schedule:
+        """This schedule with some periods starting at other times (a room's own
+        times; the same on every day). Unknown names are ignored."""
+        if not starts:
+            return self
+        periods = tuple(
+            Period(p.name, starts[p.name], None) if p.name in starts else p for p in self.periods
+        )
+        return Schedule(periods, self.alt_days)
+
     def order(self) -> tuple[str, ...]:
         """Period names in the order they happen through a normal day."""
         return tuple(p.name for p in sorted(self.periods, key=lambda p: p.start))

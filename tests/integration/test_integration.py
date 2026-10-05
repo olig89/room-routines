@@ -307,7 +307,11 @@ async def test_setup_and_add_a_room_with_area_suggestions(hass):
     )
     assert flow["type"] is FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
-    room = next(iter(entry.options["rooms"].values()))
+    rooms = entry.options["rooms"]
+    # The area became a room on its own at set-up: no sensors, starting off.
+    made = rooms[f"area_{area.id}"]
+    assert made["lights"] == ["light.pantry_ceiling"] and made["triggers"] == [] and made["start_mode"] == "off"
+    room = next(r for r in rooms.values() if r["triggers"])
     assert room["name"] == "Pantry" and room["area_id"] == area.id
     assert room["triggers"] == ["binary_sensor.pantry_door"]
     assert room["looks"] == {"Early morning": {"lights": {"light.pantry_ceiling": {"on": True}}}}

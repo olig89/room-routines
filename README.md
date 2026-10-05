@@ -1,17 +1,22 @@
 # Room Routines
 
-Motion lights that follow your household's daily routine, for Home Assistant.
+Lights that follow your household's daily routine, for Home Assistant: by
+motion, by the clock, or both.
 
 Each room switches to the look chosen for the current period of the day
 (overnight, early morning, morning, day, evening) when someone arrives, if the
-room is dark enough, and switches off when they leave. On Dark Days (grey days,
+room is dark enough, and switches off when they leave. A room without sensors
+(an office, a living room) can run a time-based routine instead: started by a
+timer, a button or the lights being switched on, it follows the day, blending
+gradually from one period's look to the next, and a room can have its own
+period times (an office's evening starting after the working day). On Dark Days (grey days,
 judged from the weather and/or a light sensor) rooms can use a second set of
 looks, or their usual looks dimmer or brighter. A look can
 be a Home Assistant scene. A light switched on by hand is left alone, and changes
 made by hand are remembered so the page can suggest better looks or times. Each
 room can run in log-only mode first.
 
-**Status: early development (0.4.0).** Install through HACS as a custom repository.
+**Status: early development (0.5.0).** Install through HACS as a custom repository.
 
 ## What you get
 
@@ -25,12 +30,32 @@ room can run in log-only mode first.
   07:00, day 09:00, evening 17:00). In the settings you can change the times,
   give some days different times, and add, rename or remove periods (one or
   more).
-- **Rooms** are added in the settings. Pick an area and its lights and
+- **Every area with lights becomes a room**, switched off so it does nothing
+  until you set it up; hide the ones you'll never use (they stay hidden until
+  you show them again). More rooms can be added in the settings.
+- **Rooms** are set up in the settings. Pick an area and its lights and
   motion/presence sensors are suggested; every field takes any entity. Each
   sensor is either one that can switch the lights on or one that can only keep
   them on (any kind of sensor can take either role). Plus a light-level sensor,
   the lux threshold, the timeout, the fade-out (15 s by default), the cooldown
   after a hand switch-off, and the drift time when the period changes.
+  Sensors are optional.
+- **Time-based routines** (per room, all optional):
+  - **its own period times**: move a period for this room only;
+  - **blending**: over the minutes before the next period starts, brightness and
+    colour move gradually from one look to the next (looks that set a level and
+    colour temperature or colour);
+  - **lights switched on another way** (a wall switch, an app): leave them alone
+    (default) or start the routine;
+  - **timers**: start the routine or switch off at a time, every day, on workdays
+    (from Home Assistant's Workday integration if you have one, else Monday to
+    Friday) or on chosen days, optionally only when it's dark and only if chosen
+    people are home;
+  - the **Start a room's routine** / **Switch a room off** actions
+    (`room_routines.switch_on` / `switch_off`, given the room's Status sensor),
+    for wall buttons.
+  A change made by hand while the routine runs pauses it until the lights are
+  switched off. A room without sensors stays on until something switches it off.
 - **Fade-out:** lights with a native transition fade by themselves; others (KNX)
   get small brightness steps, and come back at their old level next time.
 - **Per room:** a *Status* sensor (idle / lights on by motion / switched on by

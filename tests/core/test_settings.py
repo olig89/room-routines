@@ -6,11 +6,13 @@ from custom_components.room_routines.core.periods import default_schedule
 from custom_components.room_routines.core.serial import schedule_to
 from custom_components.room_routines.settings import (
     SettingsError,
+    add_area_rooms,
     add_room,
     remove_room,
     set_look,
     set_periods,
     set_tracks,
+    unhide_area,
     update_room,
 )
 
@@ -37,13 +39,56 @@ def test_add_room_starts_with_last_brightness_everywhere_and_drops_stray_keys():
     assert room["looks"] == {"Early morning": {"lights": {"light.ceiling": {"on": True}, "light.mirror": {"on": True}}}}
 
 
-def test_a_room_needs_a_name_and_a_trigger():
+def test_a_room_needs_a_name_and_lights_but_not_sensors():
     with pytest.raises(SettingsError) as err:
         add_room(base(), {**ROOM, "name": " "})
     assert err.value.key == "no_name"
     with pytest.raises(SettingsError) as err:
-        add_room(base(), {**ROOM, "triggers": []})
+        add_room(base(), {**ROOM, "lights": []})
     assert err.value.key == "invalid_room"
+    options, room_id = add_room(base(), {**ROOM, "triggers": []})
+    assert options["rooms"][room_id]["triggers"] == []
+
+
+def test_routine_settings_are_kept_and_checked():
+    data = {
+        **ROOM, "triggers": [], "on_by_hand": "routine", "blends": {"Day": 300, "Evening": 0},
+        "period_starts": {"Evening": "18:00"},
+        "timers": [{"at": "08:30", "action": "on", "days": "workdays", "only_dark": True}],
+    }
+    options, room_id = add_room(base(), data)
+    room = options["rooms"][room_id]
+    assert room["blends"] == {"Day": 300}
+    assert room["period_starts"] == {"Evening": "18:00"}
+    assert room["timers"][0]["days"] == "workdays"
+    with pytest.raises(SettingsError) as err:
+        add_room(base(), {**data, "period_starts": {"Evening": "09:00"}})  # same as Day
+    assert err.value.key == "invalid_room_times"
+    with pytest.raises(SettingsError):
+        add_room(base(), {**data, "timers": [{"at": "08:30", "action": "dance"}]})
+    renamed = set_periods(
+        options,
+        [{"name": n, "start": t} for n, t in (
+            ("Overnight", "23:00"), ("Early morning", "05:30"), ("Morning", "07:00"),
+            ("Work", "09:00"), ("Evening", "17:00"),
+        )],
+        [], {"Day": "Work"},
+    )
+    assert renamed["rooms"][room_id]["blends"] == {"Work": 300}
+
+
+def test_areas_become_rooms_that_start_off_and_stay_hidden_once_removed():
+    areas = {"office": ("Office", ["light.a", "light.b"]), "hall": ("Hall", []), "wc": ("WC", ["light.c"])}
+    options = add_area_rooms(base(), areas)
+    rooms = options["rooms"]
+    assert set(rooms) == {"area_office", "area_wc"}  # the hall has no lights
+    assert rooms["area_office"]["start_mode"] == "off" and rooms["area_office"]["triggers"] == []
+    assert add_area_rooms(options, areas) is None  # nothing new
+    options = remove_room(options, "area_wc")
+    assert options["hidden_areas"] == ["wc"]
+    assert add_area_rooms(options, areas) is None
+    options = unhide_area(options, "wc")
+    assert "area_wc" in add_area_rooms(options, areas)["rooms"]
 
 
 def test_update_keeps_looks_for_lights_still_in_the_room():

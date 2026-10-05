@@ -17,11 +17,19 @@ The config entry's options hold plain JSON:
           "threshold_lux": 50, "timeout_s": 30, "cooldown_s": 30, "drift_s": 90, "fade_out_s": 15,
           "powered_by": {"<bulb>": "<power circuit>"},
           "blinds_with_periods": false,
+          "start_mode": "off",            (mode a new room starts in; rooms made from areas start off)
+          "on_by_hand": "leave" | "routine",
+          "blends": {"Day": 300},          (minutes before the next period to start blending)
+          "period_starts": {"Evening": "18:00"},
+          "timers": [{"at": "08:30", "action": "on", "days": "workdays", "only_dark": true,
+                      "only_home": ["person.x"]}, ...],
           "looks": {"<period>": {"nothing": true} | {"scene": "scene.x"} | {"lights": {...}, "blinds": {...}}},
           "dim_looks": {"<period>": ...}   (same form; the Dark Day track)
         }
       }
     }
+
+"hidden_areas": [area ids] lists areas the user doesn't want as rooms.
 
 No "tracks" (or "on" false) means every day is a Normal day.
 
@@ -38,6 +46,7 @@ from typing import Any
 from .looks import NOTHING, LightTarget, Look
 from .periods import Period, Schedule, default_schedule
 from .room import RoomConfig
+from .timers import timer_from
 from .tracks import DEFAULT_BRIGHTNESS_PCT, DEFAULT_DARK_BELOW, DEFAULT_NORMAL_ABOVE, WEATHER, TrackSettings
 
 DEFAULT_THRESHOLD_LUX = 50.0
@@ -146,6 +155,10 @@ def room_from(data: Mapping[str, Any]) -> RoomConfig:
         fade_out=timedelta(seconds=data.get("fade_out_s", DEFAULT_FADE_OUT_S)),
         powered_by=dict(data.get("powered_by") or {}),
         blinds_with_periods=bool(data.get("blinds_with_periods", False)),
+        on_by_hand=str(data.get("on_by_hand") or "leave"),
+        blends={str(p): float(m) for p, m in (data.get("blends") or {}).items() if m},
+        period_starts={str(p): _time(t) for p, t in (data.get("period_starts") or {}).items() if t},
+        timers=tuple(timer_from(t) for t in data.get("timers") or ()),
     )
 
 
