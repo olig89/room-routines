@@ -53,7 +53,7 @@ def test_a_running_routine_is_remembered_and_picked_up_after_a_restart():
     room = Room(office(), default_schedule(), "Day", False, at(28, 10))
     room.start(at(28, 10), "timer at 10:00")
     memory = room.memory()
-    assert memory == {"owned_at": at(28, 10).isoformat(), "paused": False, "ambient": True, "someone": False}
+    assert memory == {"owned_at": at(28, 10).isoformat(), "paused": False, "hand": {}, "ambient": True, "someone": False}
     # The restart: the lights are on, so a new room starts in manual.
     after = Room(office(), default_schedule(), "Day", True, at(28, 11))
     assert after.state is State.MANUAL

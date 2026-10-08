@@ -148,6 +148,8 @@ def room_snapshot(hass: HomeAssistant, runner: RoomRunner) -> dict[str, Any]:
         "own_times": bool(runner.config.period_starts),
         "has_sensors": runner.config.has_sensors,
         "paused": room.paused if room else False,
+        # Lights changed by hand and left as set, with when each goes back (None: not by time).
+        "hand": {light: _iso(until) for light, until in room.hand.items()} if room else {},
         "signals_now": room.signal_status() if room else [],
         # Nothing to switch on in any period: the room can never light up.
         "no_look": (not room.has_any_look()) if room else False,
@@ -168,6 +170,9 @@ def room_snapshot(hass: HomeAssistant, runner: RoomRunner) -> dict[str, Any]:
             "drift_s": stored.get("drift_s"),
             "self_fading": list(stored.get("self_fading") or []),
             "on_by_hand": stored.get("on_by_hand") or "leave",
+            "hand_hold": stored.get("hand_hold") or "until_off",
+            "hand_minutes": stored.get("hand_minutes") or 30,
+            "ends": list(stored.get("ends") or []),
             "blends": dict(stored.get("blends") or {}),
             "period_starts": dict(stored.get("period_starts") or {}),
             "timers": list(stored.get("timers") or []),
@@ -401,6 +406,9 @@ ROOM_FIELDS = vol.Schema(
         vol.Required("drift_s"): vol.All(vol.Coerce(int), vol.Range(min=0, max=600)),
         vol.Optional("self_fading", default=list): [str],
         vol.Optional("on_by_hand"): vol.In(["leave", "routine"]),
+        vol.Optional("hand_hold"): vol.In(["until_off", "moves_on", "minutes"]),
+        vol.Optional("hand_minutes"): vol.All(vol.Coerce(int), vol.Range(min=1, max=1440)),
+        vol.Optional("ends"): [str],
         vol.Optional("blends"): {str: vol.All(vol.Coerce(int), vol.Range(min=0, max=1440))},
         vol.Optional("period_starts"): {str: vol.Any(None, str)},
         vol.Optional("timers"): [dict],

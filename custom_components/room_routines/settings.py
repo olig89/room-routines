@@ -68,6 +68,10 @@ def clean_room(user_input: Mapping[str, Any], previous: Mapping[str, Any] | None
     room["self_fading"] = [light for light in user_input.get("self_fading") or [] if light in room["lights"]]
     # Time-based routines (all optional: a room with none of them is a motion room).
     room["on_by_hand"] = user_input.get("on_by_hand", room.get("on_by_hand")) or "leave"
+    room["hand_hold"] = user_input.get("hand_hold", room.get("hand_hold")) or "until_off"
+    room["hand_minutes"] = int(user_input.get("hand_minutes", room.get("hand_minutes")) or 30)
+    sensors = set(room["triggers"]) | set(room["holds"])
+    room["ends"] = [s for s in user_input.get("ends", room.get("ends")) or [] if s in sensors]
     room["blends"] = {
         str(p): int(m) for p, m in (user_input.get("blends", room.get("blends")) or {}).items() if m
     }

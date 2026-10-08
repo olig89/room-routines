@@ -199,7 +199,7 @@ def test_a_rule_look_stops_blending():
 def test_a_changed_rule_while_paused_leaves_the_lights():
     room = make(landing())
     room.sensor(M, True, at("12:00"))
-    room.paused = True
+    room.hand = {light: None for light in room.config.switchable()}
     d = room.set_context(Rule(Condition(BEDTIME), CAP, max_pct=5), "bedtime", "", at("19:00"))
     assert not d.actions
 

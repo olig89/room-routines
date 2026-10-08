@@ -7,7 +7,7 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.9.0";
+const PANEL_VERSION = "0.10.0";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
@@ -26,6 +26,11 @@ const ROOM_DEFAULTS = { threshold_lux: 50, timeout_s: 30, fade_out_s: 15, cooldo
 const ON_BY_HAND = {
   leave: "Leave them as they are",
   routine: "Start the routine (after 3 seconds)",
+};
+const HAND_HOLD = {
+  until_off: "Until the lights are switched off",
+  moves_on: "Until the routine moves on",
+  minutes: "For a number of minutes",
 };
 const TIMER_DAYS = { every_day: "Every day", workdays: "Workdays", days: "Chosen days" };
 const RULE_ACTIONS = { nothing: "Do nothing", look: "Use another look", cap: "No brighter than" };
@@ -423,10 +428,13 @@ class RoomRoutinesPanel extends HTMLElement {
 
   _statusLine(room) {
     let label = STATE_LABEL[room.state] || room.state || "Starting";
-    if (room.state === "owned" && room.paused) label = "Changed by hand: following paused until the lights go off";
+    if (room.state === "owned" && room.paused) label = "Changed by hand: left as set";
     else if (room.state === "owned" && !room.has_sensors) label = "Following its routine";
     const bits = [`<b>${esc(label)}</b>`];
     if (room.rule) bits.push(`<span class="warntext">${esc(room.rule)}</span>`);
+    const held = Object.entries(room.hand || {});
+    if (held.length && !room.paused) bits.push(`changed by hand: ${held.map(([l, u]) => esc(this._name(l)) + (u ? ` until ${esc(hhmm(u))}` : "")).join(", ")}`);
+    else if (held.length && held.some(([, u]) => u)) bits.push(`back to the routine at ${esc(hhmm(held.map(([, u]) => u).filter(Boolean).sort()[0]))}`);
     for (const sig of room.signals_now || []) bits.push(`<span class="signal">signal: ${esc(sig.name)} on ${sig.lights.map((l) => esc(this._name(l))).join(", ")}</span>`);
     if (room.unmet) bits.push(`waiting: only when ${esc(room.unmet)}`);
     if (room.blending) bits.push(`blending into ${esc(room.blending.into)} (${Math.round(room.blending.fraction * 100)} %)`);
@@ -623,7 +631,8 @@ class RoomRoutinesPanel extends HTMLElement {
           ? `<div>Goes dark <b>${esc(s.timeout_s)} s</b> after the room empties, fading out over <b>${esc(s.fade_out_s)} s</b>.</div>
         <div>After a light is switched off by hand, motion is ignored for <b>${esc(s.cooldown_s)} s</b>.</div>`
           : `<div>No sensors: the routine starts from ${(s.timers || []).some((t) => t.action !== "off") ? "its timers, " : ""}${s.on_by_hand === "routine" ? "the lights being switched on another way, " : ""}the <b>Start the routine</b> button or the <code>room_routines.switch_on</code> action, and runs until the lights are switched off.</div>`}
-        <div>Lights switched on another way (a wall switch, an app): <b>${esc(ON_BY_HAND[s.on_by_hand || "leave"])}</b>. A change by hand while the routine runs pauses it until the lights go off.</div>
+        ${(s.ends || []).length ? `<div>Goes dark at once, without waiting or fading, when ${s.ends.map((t) => `<b>${esc(this._name(t))}</b>`).join(" or ")} goes off.</div>` : ""}
+        <div>Lights switched on another way (a wall switch, an app): <b>${esc(ON_BY_HAND[s.on_by_hand || "leave"])}</b>. A light changed by hand while the room runs it is left as set <b>${esc(this._handText(s))}</b>; the others carry on.</div>
         ${(s.timers || []).map((t) => `<div>Timer: ${esc(this._timerText(t))}.</div>`).join("")}
         ${(s.starters || []).map((c) => `<div>Starts when <b>${esc(this._condText(c))}</b>.</div>`).join("")}
         ${(s.only_when || []).length ? `<div>Starts only when ${s.only_when.map((c) => `<b>${esc(this._condText(c))}</b>`).join(" and ")}.</div>` : ""}
@@ -931,10 +940,13 @@ class RoomRoutinesPanel extends HTMLElement {
     if (room) {
       this._roomDraft = { id: room.id, name: room.name, area_id: room.area_id, mode: room.mode, ...JSON.parse(JSON.stringify(room.settings)) };
     } else {
-      this._roomDraft = { id: null, name: "", area_id: null, lights: [], triggers: [], holds: [], lux_sensor: null, self_fading: [], on_by_hand: "leave", blends: {}, period_starts: {}, timers: [], starters: [], only_when: [], rules: [], signals: [], ...ROOM_DEFAULTS };
+      this._roomDraft = { id: null, name: "", area_id: null, lights: [], triggers: [], holds: [], lux_sensor: null, self_fading: [], on_by_hand: "leave", hand_hold: "until_off", hand_minutes: 30, ends: [], blends: {}, period_starts: {}, timers: [], starters: [], only_when: [], rules: [], signals: [], ...ROOM_DEFAULTS };
     }
     const r = this._roomDraft;
     r.on_by_hand = r.on_by_hand || "leave";
+    r.hand_hold = r.hand_hold || "until_off";
+    r.hand_minutes = r.hand_minutes || 30;
+    r.ends = [...(r.ends || [])];
     r.blends = { ...(r.blends || {}) };
     r.period_starts = { ...(r.period_starts || {}) };
     r.timers = (r.timers || []).map((t) => ({ ...t, weekdays: [...(t.weekdays || [])], only_home: [...(t.only_home || [])] }));
@@ -972,6 +984,10 @@ class RoomRoutinesPanel extends HTMLElement {
         ${this._picker("lights", "Lights", "light", "The lights this room switches.")}
         ${this._picker("triggers", "Sensors that switch the lights on", "binary_sensor", "Optional. Any motion or presence sensor. When one of these sees someone and it's dark enough, the lights come on. A room without sensors runs on timers, a button or the lights being switched on.")}
         ${this._picker("holds", "Sensors that only keep the lights on", "binary_sensor", "Optional. These never switch the lights on, but keep them on while they see someone.")}
+        ${[...r.triggers, ...r.holds].length ? `<fieldset><legend>Off at once</legend>
+          <span class="help">For a sensor whose going off means everyone has left, such as a pantry or cupboard door closing: the lights go off straight away, without waiting for the other sensors, the timeout or the fade.</span><div>
+          ${[...r.triggers, ...r.holds].map((e) => `<label class="inline"><input type="checkbox" data-ends="${esc(e)}" ${r.ends.includes(e) ? "checked" : ""}> ${esc(this._name(e))}</label>`).join("")}
+        </div></fieldset>` : ""}
         <label>Light-level sensor <select data-room-field="lux_sensor"><option value="">None</option>
           ${luxOptions.map((e) => `<option value="${esc(e)}" ${e === r.lux_sensor ? "selected" : ""}>${esc(this._name(e))}${r.area_id && this._areaOf(e) === r.area_id ? " (in this area)" : ""}</option>`).join("")}
         </select><span class="help">Optional. Only read while the room's lights are off.</span></label>
@@ -996,6 +1012,12 @@ class RoomRoutinesPanel extends HTMLElement {
           <button class="btn" data-action="room-cancel">Cancel</button>
         </div>
       </div>`;
+  }
+
+  _handText(s) {
+    if (s.hand_hold === "moves_on") return "until the routine moves on";
+    if (s.hand_hold === "minutes") return `for ${s.hand_minutes || 30} min`;
+    return "until the lights are switched off";
   }
 
   _timerText(t) {
@@ -1036,7 +1058,11 @@ class RoomRoutinesPanel extends HTMLElement {
       <span class="help">For rooms that should follow the clock rather than (or as well as) motion: an office, a living room.</span>
       <label>When the lights are switched on another way <select data-room-field="on_by_hand">
         ${Object.entries(ON_BY_HAND).map(([k, v]) => `<option value="${k}" ${k === r.on_by_hand ? "selected" : ""}>${v}</option>`).join("")}
-      </select><span class="help">A wall switch or another app. Starting the routine gives the lights the period's look and then follows the day. However it started, changing a light by hand pauses the routine until the lights are switched off.</span></label>
+      </select><span class="help">A wall switch or another app. Starting the routine gives the lights the period's look and then follows the day.</span></label>
+      <label>A light changed by hand is left as set <select data-room-field="hand_hold">
+        ${Object.entries(HAND_HOLD).map(([k, v]) => `<option value="${k}" ${k === r.hand_hold ? "selected" : ""}>${v}</option>`).join("")}
+      </select><span class="help">Only the lights you change are left alone; the room's other lights carry on with the routine. "Moves on" means a new period starts, the day turns into a Dark Day or back, a rule starts or ends, or someone arrives or leaves. Then the light goes back to what the room is doing.</span></label>
+      ${r.hand_hold === "minutes" ? `<label>For <span class="inputunit"><input type="number" min="1" max="1440" step="5" value="${esc(r.hand_minutes)}" data-room-field="hand_minutes" aria-label="Minutes"> min</span></label>` : ""}
       <table class="plain periods">
         <tr><th>Period</th><th>This room's start</th><th>Blend into the next period over</th></tr>
         ${order.map((p) => `<tr>
@@ -1428,7 +1454,7 @@ class RoomRoutinesPanel extends HTMLElement {
         const r = this._roomDraft;
         if (el.type === "number") r[f] = el.value === "" ? null : Number(el.value);
         else r[f] = el.value || null;
-        if (f === "area_id" || f === "mode") this._render();
+        if (f === "area_id" || f === "mode" || f === "hand_hold") this._render();
       })
     );
     root.querySelectorAll("[data-pick-search]").forEach((el) =>
@@ -1531,6 +1557,14 @@ class RoomRoutinesPanel extends HTMLElement {
         const t = this._roomDraft.timers[Number(el.dataset.timerPerson)];
         t.only_home = (t.only_home || []).filter((x) => x !== el.dataset.person);
         if (el.checked) t.only_home.push(el.dataset.person);
+      })
+    );
+    root.querySelectorAll("[data-ends]").forEach((el) =>
+      el.addEventListener("change", () => {
+        const e = el.dataset.ends;
+        const list = this._roomDraft.ends.filter((x) => x !== e);
+        if (el.checked) list.push(e);
+        this._roomDraft.ends = list;
       })
     );
     root.querySelectorAll("[data-self-fading]").forEach((el) =>
@@ -1911,6 +1945,9 @@ class RoomRoutinesPanel extends HTMLElement {
           drift_s: r.drift_s ?? ROOM_DEFAULTS.drift_s,
           self_fading: r.self_fading.filter((l) => r.lights.includes(l)),
           on_by_hand: r.on_by_hand || "leave",
+          hand_hold: r.hand_hold || "until_off",
+          hand_minutes: Math.max(1, Math.min(1440, Number(r.hand_minutes) || 30)),
+          ends: r.ends.filter((e) => r.triggers.includes(e) || r.holds.includes(e)),
           blends: r.blends,
           period_starts: r.period_starts,
           starters: this._cleanConds(r.starters),

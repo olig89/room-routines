@@ -54,8 +54,14 @@ room can run in log-only mode first.
   - the **Start a room's routine** / **Switch a room off** actions
     (`room_routines.switch_on` / `switch_off`, given the room's Status sensor),
     for wall buttons.
-  A change made by hand while the routine runs pauses it until the lights are
-  switched off. A room without sensors stays on until something switches it off.
+  A light changed by hand while the room runs it is left as it was set; the
+  room's other lights carry on. Per room, it's left alone until the lights are
+  switched off (the default), until the routine moves on (a new period, a Dark
+  Day change, a rule starting or ending, someone arriving or the room emptying)
+  or for a number of minutes, and then goes back to what the room is doing.
+  A sensor can be marked **off at once**: when it goes off (a pantry door
+  closing) the lights go off straight away, without waiting for the other
+  sensors, the timeout or the fade. A room without sensors stays on until something switches it off.
   A routine that was running carries on after Home Assistant restarts (a hand
   change that was holding it stays held), instead of the room treating its lit
   lights as switched on by hand. A light that reports in late after the restart

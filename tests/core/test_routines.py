@@ -132,7 +132,7 @@ def test_a_hand_change_pauses_following_until_the_lights_go_off():
     r.start(at(5, 9), "button")
     d = r.lights(True, own=False, now=at(5, 10))
     assert r.paused and d.change is not None
-    assert "following paused until the lights are switched off" in d.reason
+    assert "left as set until the lights are switched off" in d.reason
     assert r.blend_tick(at(5, 15)).actions == ()
     assert r.period_changed("Evening", at(5, 18)).actions == ()
     r.lights(False, own=False, now=at(5, 19))

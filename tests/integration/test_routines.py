@@ -347,3 +347,29 @@ async def test_a_call_signal_takes_the_iris_and_gives_it_back(hass, lights, free
     await hass.async_block_till_done()
     back = lights.of("turn_on")[-1]
     assert back["entity_id"] == IRIS and back["brightness_pct"] == 40 and "rgb_color" not in back
+
+
+LAMP = "light.office_lamp"
+
+
+async def test_a_light_changed_by_hand_for_minutes_goes_back_on_time(hass, lights, freezer):
+    """Only the touched light is held, and the room wakes for its time even while
+    it also waits for something else."""
+    hass.states.async_set(LAMP, "off", {"supported_features": LightEntityFeature.TRANSITION})
+    both = {"lights": {PLAY: FOCUS["lights"][PLAY], LAMP: {"on": True, "brightness_pct": 30}}}
+    await setup(hass, lights=[PLAY, LAMP], looks={"Morning": both, "Evening": DARK},
+                hand_hold="minutes", hand_minutes=20, blends={})
+    await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
+    await hass.async_block_till_done()
+    await at(hass, freezer, "2026-09-28 07:00:20+00:00")
+    hass.states.async_set(LAMP, "on", {"brightness": 255})  # someone turns the lamp up
+    await hass.async_block_till_done()
+    assert set(room(hass).hand) == {LAMP} and not room(hass).paused
+    assert "changed by hand" in hass.states.get(STATUS).attributes["reason"]
+    sent = len(lights.calls)
+    await at(hass, freezer, "2026-09-28 07:10:00+00:00")
+    assert len(lights.calls) == sent
+    await at(hass, freezer, "2026-09-28 07:20:21+00:00")
+    assert room(hass).hand == {}
+    assert lights.of("turn_on")[-1]["entity_id"] == LAMP
+    assert lights.of("turn_on")[-1]["brightness_pct"] == 30

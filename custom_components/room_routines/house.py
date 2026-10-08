@@ -146,6 +146,7 @@ class RoomRunner:
         self.mode_entity_id: str | None = None
         self._unsubs: list[CALLBACK_TYPE] = []
         self._wake: CALLBACK_TYPE | None = None
+        self._wake_at: datetime | None = None
         self._fades: list[CALLBACK_TYPE] = []
         # Brightness each light had before a stepped fade-out. A light that
         # remembers its last level (a KNX DALI light) would otherwise come back
@@ -207,6 +208,7 @@ class RoomRunner:
         if self._wake:
             self._wake()
             self._wake = None
+        self._wake_at = None
         if self._own_period:
             self._own_period()
             self._own_period = None
@@ -286,8 +288,13 @@ class RoomRunner:
         owned_at = dt_util.parse_datetime(memory.get("owned_at") or "")
         if owned_at is not None and now - owned_at > MAX_REMEMBERED_AGE:
             owned_at = now
+        hand = memory.get("hand")
+        if isinstance(hand, dict):
+            hand = {light: (dt_util.parse_datetime(u) if u else None) for light, u in hand.items()}
+        else:
+            hand = None
         self._run(self.room.restore(
-            owned_at, bool(memory.get("paused")), now, memory.get("ambient"), memory.get("someone")
+            owned_at, bool(memory.get("paused")), now, memory.get("ambient"), memory.get("someone"), hand
         ))
 
     def _persist(self) -> None:
@@ -381,7 +388,7 @@ class RoomRunner:
         )
         if not own:
             self._before_fade.pop(entity, None)  # a person's level wins from now on
-        self._run(self.room.lights(self._any_on(), own, now))
+        self._run(self.room.lights(self._any_on(), own, now, entity))
         if self._restore is not None and on:
             # A light reporting in after the restart. KNX lights come back "off"
             # until their bus read answers, then "on", so any switch-on inside the
@@ -570,8 +577,24 @@ class RoomRunner:
     @callback
     def _tick(self, now: datetime) -> None:
         self._wake = None
+        self._wake_at = None
         if self.room is not None and self.mode != MODE_OFF:
             self._run(self.room.tick(now))
+            self._arm(None)  # whatever else the room still waits for
+
+    def _arm(self, at: datetime | None) -> None:
+        """Wake the room at the earliest thing it waits for (it keeps several: a
+        countdown, a change by hand running out, sensors after a restart)."""
+        times = [t for t in (at, self._wake_at, self.room.next_wake() if self.room else None) if t is not None]
+        if not times:
+            return
+        first = min(times)
+        if self._wake is not None and self._wake_at == first:
+            return
+        if self._wake:
+            self._wake()
+        self._wake_at = first
+        self._wake = async_track_point_in_time(self.hass, self._tick, first)
 
     @callback
     def _run(self, decision: Decision) -> None:
@@ -580,9 +603,7 @@ class RoomRunner:
         acting = False
         for action in decision.actions:
             if isinstance(action, WakeAt):
-                if self._wake:
-                    self._wake()
-                self._wake = async_track_point_in_time(self.hass, self._tick, action.at)
+                self._arm(action.at)
                 continue
             acting = True
             if self.mode != MODE_LIVE:
