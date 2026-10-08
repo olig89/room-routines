@@ -56,6 +56,10 @@ room can run in log-only mode first.
     for wall buttons.
   A change made by hand while the routine runs pauses it until the lights are
   switched off. A room without sensors stays on until something switches it off.
+  A routine that was running carries on after Home Assistant restarts (a hand
+  change that was holding it stays held), instead of the room treating its lit
+  lights as switched on by hand. A light that reports in late after the restart
+  still counts, for up to five minutes.
 - **Listening to the rest of the house** (per room, all optional):
   - **starters**: start the routine when any entity reaches a state (a computer
     switching on, a door opening, someone coming home); unlike a motion sensor it
@@ -70,7 +74,9 @@ room can run in log-only mode first.
 - **Fade-out:** lights with a native transition fade by themselves; others (KNX)
   get small brightness steps, and come back at their old level next time.
 - **Per room:** a *Status* sensor (idle / lights on by motion / switched on by
-  hand, with the reason), a *Mode* select (off / log only / live; new rooms start
+  hand, with the reason, and a `layer` attribute saying what has the lights:
+  `ambient` (the routine), `someone` (motion), `hand` (a change made by hand) or
+  empty when they're off), a *Mode* select (off / log only / live; new rooms start
   in log only) and a *Light level* sensor (the held ambient value).
 - **Dark Days:** a day counts as dark by comparing the light now with a
   *clear* day at the same height of the sun, so an ordinary evening or a bright

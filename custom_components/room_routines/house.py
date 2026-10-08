@@ -59,6 +59,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import ANY_SIGNAL, DOMAIN, MODE_LIVE, MODE_LOG_ONLY, MODE_OFF, house_signal, room_signal
 from .core.fade import plan_fade
+from .core.layers import LAYER_IDS
 from .core.habits import Change, Suggestion, change_from, change_to, suggest
 from .core.looks import OFF, LightTarget, Look, resolve, scaled
 from .core.matching import Command, OwnChangeMatcher
@@ -96,6 +97,9 @@ KEEP_CHANGES = timedelta(days=60)
 MAX_CHANGES = 2000
 DISMISS_FOR = timedelta(days=28)
 STORE_VERSION = 1
+# After a restart, how long a room waits for its lights to come back before it
+# stops trying to pick its routine up again (lights reporting late, as KNX can).
+RESTORE_GRACE = timedelta(minutes=5)
 SCENE_PLATFORM = "homeassistant_scene"  # Home Assistant's own (YAML / editor) scenes
 
 
@@ -145,6 +149,11 @@ class RoomRunner:
         self._pending_change: CALLBACK_TYPE | None = None
         self._own_period: CALLBACK_TYPE | None = None
         self._warned_scenes: set[str] = set()
+        # What the room was doing before a restart (see ``Room.memory``), until used.
+        self._restore: dict[str, Any] | None = None
+        self._restore_until: datetime | None = None
+        self._memory_read = False
+        self._room_mode: str | None = None  # the mode the current core room was built for
         # The room's own rules first, then the house's that cover it.
         self.rules: tuple[Rule, ...] = tuple(self.config.rules) + tuple(
             r for r in house.house_rules if r.applies_to(self.room_id)
@@ -201,6 +210,16 @@ class RoomRunner:
         """A fresh core room, from the lights and sensors as they are now."""
         self._cancel_timers()
         now = dt_util.now()
+        if not self._memory_read:
+            # The first build (the mode select can get here before ``start``).
+            self._memory_read = True
+            self._restore = self.house.room_memory.get(self.room_id)
+            self._restore_until = now + RESTORE_GRACE if self._restore else None
+        elif self.room is not None and self._room_mode == MODE_LIVE and self.mode == MODE_LIVE:
+            # Rebuilt while live: a running routine carries on, as after a restart.
+            if (carry := self.room.memory()) is not None:
+                self._restore, self._restore_until = carry, now + RESTORE_GRACE
+        self._room_mode = self.mode
         lights_on = self.mode == MODE_LIVE and self._any_on()
         self.room = Room(
             self.config, self.schedule, self.period_now(now), lights_on, now,
@@ -213,7 +232,37 @@ class RoomRunner:
         rule, rule_text, unmet_text = self._context(self._states())
         self.room.rule, self.room.rule_text, self.room.unmet_text = rule, rule_text, unmet_text
         self._offer_lux(self.hass.states.get(self.lux_sensor) if self.lux_sensor else None, now)
+        self._try_restore(now)
+        self._persist()
         self._notify()
+
+    def _try_restore(self, now: datetime) -> None:
+        """Pick up a routine that was running before the restart, once the room is
+        live and its lights are found on."""
+        if self._restore is None or self.room is None or self.mode != MODE_LIVE:
+            return
+        if self._restore_until is not None and now > self._restore_until:
+            self._restore = None
+            return
+        if self.room.state is not State.MANUAL:
+            return  # lights not back yet (or off): keep waiting until the grace ends
+        memory, self._restore = self._restore, None
+        owned_at = dt_util.parse_datetime(memory.get("owned_at") or "")
+        self._run(self.room.restore(owned_at, bool(memory.get("paused")), now))
+
+    def _persist(self) -> None:
+        """Remember whether the routine is running, for the next restart."""
+        if self._restore is not None:
+            if self._restore_until is not None and dt_util.now() <= self._restore_until:
+                return  # still waiting to pick it up: keep what was remembered
+            self._restore = None
+        memory = self.room.memory() if self.room is not None and self.mode == MODE_LIVE else None
+        self.house.remember(self.room_id, memory)
+
+    def layer(self) -> str | None:
+        """Which layer has the room's lights now, as an id (None: off)."""
+        layer = self.room.layer() if self.room is not None and self.mode != MODE_OFF else None
+        return LAYER_IDS[layer] if layer is not None else None
 
     @callback
     def set_mode(self, mode: str) -> None:
@@ -272,6 +321,9 @@ class RoomRunner:
         if not own:
             self._before_fade.pop(entity, None)  # a person's level wins from now on
         self._run(self.room.lights(self._any_on(), own, now))
+        old = event.data.get("old_state")
+        if self._restore is not None and (old is None or old.state in (STATE_UNAVAILABLE, STATE_UNKNOWN)):
+            self._try_restore(now)  # a light reporting in after the restart
 
     @callback
     def _on_lux(self, event: Event[EventStateChangedData]) -> None:
@@ -479,6 +531,7 @@ class RoomRunner:
         if acting:
             prefix = "" if self.mode == MODE_LIVE else "Log only: would act. "
             self.hass.async_create_task(self._log(prefix + decision.reason))
+        self._persist()
         self._notify()
 
     # -- hand changes --
@@ -792,6 +845,9 @@ class House:
         self.dismissed: dict[str, str] = {}  # suggestion key -> hidden until (ISO)
         self._store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, f"{DOMAIN}.habits")
         self._daylight_store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, f"{DOMAIN}.daylight")
+        # Rooms whose routine was running, so a restart can carry on (see Room.memory).
+        self._rooms_store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, f"{DOMAIN}.rooms")
+        self.room_memory: dict[str, dict[str, Any]] = {}
         self._learned: dict[str, datetime] = {}  # sensor -> statistics read up to
         self.house_rules: tuple[Rule, ...] = tuple(
             rule_from(r) for r in self.options.get("house_rules") or ()
@@ -814,6 +870,8 @@ class House:
             except (KeyError, ValueError, TypeError):
                 continue
         self.dismissed = dict(data.get("dismissed") or {})
+        rooms = await self._rooms_store.async_load() or {}
+        self.room_memory = {k: v for k, v in (rooms.get("rooms") or {}).items() if isinstance(v, dict)}
         daylight = await self._daylight_store.async_load() or {}
         for sensor, row in (daylight.get("sensors") or {}).items():
             try:
@@ -1096,6 +1154,20 @@ class House:
         self.changes = [c for c in self.changes if c.at >= cutoff][-(MAX_CHANGES - 1):] + [change]
         self._save()
         self._announce()
+
+    def remember(self, room_id: str, memory: dict[str, Any] | None) -> None:
+        """A room's state for the next restart (None: nothing running)."""
+        if self.room_memory.get(room_id) == memory:
+            return
+        if memory is None:
+            self.room_memory.pop(room_id, None)
+        else:
+            self.room_memory[room_id] = memory
+        self._rooms_store.async_delay_save(lambda: {"rooms": dict(self.room_memory)}, 2)
+
+    async def async_save_rooms(self) -> None:
+        """Write the rooms' memory now (on unload: a delayed save might not happen first)."""
+        await self._rooms_store.async_save({"rooms": dict(self.room_memory)})
 
     def dismiss(self, key: str) -> None:
         self.dismissed[key] = (dt_util.now() + DISMISS_FOR).isoformat()

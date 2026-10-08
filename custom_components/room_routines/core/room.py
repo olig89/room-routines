@@ -58,6 +58,14 @@ Hand changes: when someone changes a light the room switched on (dims it,
 switches it off), the decision carries a ``HandChange`` so the integration can
 remember it and, if it keeps happening, suggest a better look or schedule.
 
+Layers (see ``layers``): a room with sensors runs *Someone's there*, one
+without runs *Ambient*; a light changed by hand is held by *Hand* until the
+lights are switched off. ``layer()`` says which one has the lights now.
+
+After a restart the room can't see who switched its lights on. The integration
+keeps ``memory()`` (was the routine running, was a hand change holding it) and
+hands it back with ``restore``, so a routine that was running carries on.
+
 Log-only mode lives in the integration, not here: it carries out no actions
 and reports the room's own commands back as light changes, so the room runs on
 what it *would* have done while the real lights follow the old wall-sensor
@@ -72,6 +80,7 @@ from datetime import datetime, time, timedelta
 from enum import Enum
 
 from .blend import blend, blendable, fraction
+from .layers import Layer
 from .looks import LightTarget, Look, LookSource, resolve, scaled
 from .lux import AmbientTracker, dark_enough
 from .periods import Schedule
@@ -137,6 +146,11 @@ class RoomConfig:
     @property
     def has_sensors(self) -> bool:
         return bool(self.triggers or self.holds)
+
+    @property
+    def base_layer(self) -> Layer:
+        """The layer the room's looks belong to: Someone's there with sensors, else Ambient."""
+        return Layer.SOMEONE if self.has_sensors else Layer.AMBIENT
 
     def switchable(self) -> tuple[str, ...]:
         """The lights the room may switch off: never a power circuit."""
@@ -414,6 +428,36 @@ class Room:
         self.paused = False
         self.adopt_at = None
         self._last_blend = None
+
+    # -- layers --
+
+    def layer(self) -> Layer | None:
+        """Which layer has the room's lights now (None: they're off)."""
+        if self.state is State.IDLE:
+            return None
+        if self.state is State.MANUAL or self.paused:
+            return Layer.HAND
+        return self.config.base_layer
+
+    def memory(self) -> dict | None:
+        """What to remember across a restart: only a running routine."""
+        if self.state is not State.OWNED:
+            return None
+        return {"owned_at": (self.owned_at.isoformat() if self.owned_at else None), "paused": self.paused}
+
+    def restore(self, owned_at: datetime | None, paused: bool, now: datetime) -> Decision:
+        """After a restart: the routine was running these lights, so carry on.
+        Only for a room whose lights were found on (``MANUAL``)."""
+        if self.state is not State.MANUAL:
+            return self._unchanged()
+        self._own(now)
+        self.owned_at = owned_at or now
+        self.paused = paused
+        decision = self._restyle("picked up again after a restart", blinds=False, now=now)
+        countdown = self._check_timer(now)
+        if countdown is not None:
+            return self._decide(f"{decision.reason}; {countdown.reason}", *decision.actions, *countdown.actions)
+        return decision
 
     # -- events --
 

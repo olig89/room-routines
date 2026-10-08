@@ -186,3 +186,61 @@ async def test_a_house_rule_dims_a_lit_room_and_lets_go_after(hass, lights, free
     hass.states.async_set(BEDTIME, "off")
     await hass.async_block_till_done()
     assert lights.of("turn_on")[-1]["brightness_pct"] == 40
+
+
+async def live(hass: HomeAssistant) -> None:
+    await hass.services.async_call(
+        "select", "select_option", {"entity_id": "select.office_routine_mode", "option": "live"}, blocking=True
+    )
+    await hass.async_block_till_done()
+
+
+async def test_a_running_routine_carries_on_after_a_restart(hass, lights, freezer):
+    entry = await setup(hass)
+    await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
+    await hass.async_block_till_done()
+    hass.states.async_set(PLAY, "on", {"brightness": 102, "supported_features": LightEntityFeature.TRANSITION})
+    await hass.async_block_till_done()
+    assert room(hass).state.value == "owned"
+    assert hass.states.get(STATUS).attributes["layer"] == "ambient"
+    await at(hass, freezer, "2026-09-28 07:00:10+00:00")  # the memory is written
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    await live(hass)
+    r = room(hass)
+    assert r.state.value == "owned", r.last.reason
+    assert r.last.reason.startswith("picked up again after a restart")
+    assert hass.states.get(STATUS).attributes["layer"] == "ambient"
+    # It follows the day again: at 15:30 it's blending.
+    await at(hass, freezer, "2026-09-28 12:30:00+00:00")
+    assert lights.of("turn_on")[-1]["brightness_pct"] == pytest.approx(22.5)
+
+
+async def test_lights_on_by_hand_before_a_restart_stay_left_alone(hass, lights, freezer):
+    entry = await setup(hass)
+    hass.states.async_set(PLAY, "on", {"brightness": 255})  # nothing to do with the routine
+    await hass.async_block_till_done()
+    await at(hass, freezer, "2026-09-28 07:00:10+00:00")
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    await live(hass)
+    assert room(hass).state.value == "manual"
+    assert hass.states.get(STATUS).attributes["layer"] == "hand"
+
+
+async def test_a_light_reporting_late_after_a_restart_is_still_picked_up(hass, lights, freezer):
+    entry = await setup(hass)
+    await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
+    await hass.async_block_till_done()
+    hass.states.async_set(PLAY, "on", {"brightness": 102, "supported_features": LightEntityFeature.TRANSITION})
+    await hass.async_block_till_done()
+    await at(hass, freezer, "2026-09-28 07:00:10+00:00")
+    hass.states.async_set(PLAY, "unavailable")  # the restart: the light isn't back yet
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    await live(hass)
+    assert room(hass).state.value == "idle"
+    await at(hass, freezer, "2026-09-28 07:01:00+00:00")
+    hass.states.async_set(PLAY, "on", {"brightness": 102, "supported_features": LightEntityFeature.TRANSITION})
+    await hass.async_block_till_done()
+    assert room(hass).state.value == "owned", room(hass).last.reason

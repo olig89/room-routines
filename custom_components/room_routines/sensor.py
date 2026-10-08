@@ -53,6 +53,7 @@ class RoomStatusSensor(RoomEntity, SensorEntity):
             "period": self.house.period,
             "track": self.house.track,
             "mode": self.runner.mode,
+            "layer": self.runner.layer(),
             "stealth": self.house.stealth,
         }
         if room and room.deadline:
