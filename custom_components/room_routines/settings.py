@@ -17,6 +17,10 @@ from .core.serial import first_look, look_from, look_to, room_from, schedule_fro
 from .core.tracks import DIM, NORMAL, TRACKS
 
 LOOK_KEYS = {NORMAL: "looks", DIM: "dim_looks"}
+# Someone's there looks: brighter while someone's there, over a running routine.
+SOMEONE_KEYS = {NORMAL: "someone_looks", DIM: "someone_dim_looks"}
+ALL_LOOK_KEYS = (*LOOK_KEYS.values(), *SOMEONE_KEYS.values())
+LAYERS = ("base", "someone")
 
 
 class SettingsError(ValueError):
@@ -87,7 +91,7 @@ def clean_room(user_input: Mapping[str, Any], previous: Mapping[str, Any] | None
         raise SettingsError("invalid_room")
     # Looks may only mention the room's lights.
     kept = set(room["lights"])
-    for key in LOOK_KEYS.values():
+    for key in ALL_LOOK_KEYS:
         for look in (room.get(key) or {}).values():
             if "lights" in look:
                 look["lights"] = {light: t for light, t in look["lights"].items() if light in kept}
@@ -236,7 +240,7 @@ def set_periods(
     renames = dict(renames or {})
     for room in out[CONF_ROOMS].values():
         before = {k: dict(room.get(k) or {}) for k in list(room) if k.endswith("looks")}
-        for key in LOOK_KEYS.values():
+        for key in ALL_LOOK_KEYS:
             if key not in room:
                 continue
             looks: dict[str, Any] = {}
@@ -332,16 +336,21 @@ def set_look(
     period: str,
     look: Mapping[str, Any] | None,
     track: str = NORMAL,
+    layer: str = "base",
 ) -> dict[str, Any]:
     """A room's look for one period on one track. ``None`` removes it: on Normal
-    the period then borrows the previous period's; on a Dark Day it uses its Normal look."""
+    the period then borrows the previous period's; on a Dark Day it uses its Normal look.
+    ``layer`` "someone" is the Someone's there table (brighter over a running routine)."""
     out = _options(options)
     room = _room(out, room_id)
     if period not in {p.name for p in schedule_from(out).periods}:
         raise SettingsError("unknown_period")
     if track not in TRACKS:
         raise SettingsError("unknown_track")
-    looks = room.setdefault(LOOK_KEYS[track], {})
+    if layer not in LAYERS:
+        raise SettingsError("unknown_layer")
+    key = (SOMEONE_KEYS if layer == "someone" else LOOK_KEYS)[track]
+    looks = room.setdefault(key, {})
     if look is None:
         looks.pop(period, None)
         return out

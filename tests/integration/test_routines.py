@@ -278,3 +278,39 @@ async def test_a_restart_sends_the_look_once(hass, lights, freezer):
     await live(hass)
     assert room(hass).state.value == "owned"
     assert len(lights.of("turn_on")) - sent <= 1
+
+
+MOTION = "binary_sensor.office_motion"
+BRIGHT = {"lights": {PLAY: {"on": True, "brightness_pct": 80, "color_temp_kelvin": 4000}}}
+
+
+async def test_someone_there_brightens_the_routine_and_hands_back(hass, lights, freezer):
+    hass.states.async_set(MOTION, "off")
+    await setup(hass, triggers=[MOTION], timeout_s=30, fade_out_s=15, someone_looks={"Morning": BRIGHT})
+    await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
+    await hass.async_block_till_done()
+    assert lights.of("turn_on")[-1]["brightness_pct"] == 40  # the routine's Focus look
+    hass.states.async_set(MOTION, "on")
+    await hass.async_block_till_done()
+    assert lights.of("turn_on")[-1]["brightness_pct"] == 80
+    assert hass.states.get(STATUS).attributes["layer"] == "someone"
+    hass.states.async_set(MOTION, "off")
+    await hass.async_block_till_done()
+    await at(hass, freezer, "2026-09-28 07:00:40+00:00")
+    back = lights.of("turn_on")[-1]
+    assert back["brightness_pct"] == 40 and not lights.of("turn_off")
+    assert hass.states.get(STATUS).attributes["layer"] == "ambient"
+
+
+async def test_save_look_writes_the_someone_table(hass, lights, hass_ws_client):
+    entry = await setup(hass, triggers=[MOTION])
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({
+        "type": "room_routines/save_look", "room_id": "office", "period": "Day", "layer": "someone",
+        "how": "custom", "look": BRIGHT,
+    })
+    msg = await client.receive_json()
+    assert msg["success"], msg
+    stored = hass.config_entries.async_get_entry(entry.entry_id).options["rooms"]["office"]
+    assert stored["someone_looks"]["Day"]["lights"][PLAY]["brightness_pct"] == 80
+    assert "Day" not in stored["looks"]

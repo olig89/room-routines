@@ -7,7 +7,7 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.7.1";
+const PANEL_VERSION = "0.8.0";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
@@ -90,6 +90,7 @@ class RoomRoutinesPanel extends HTMLElement {
     this._periodDraft = null; // settings: period list being changed
     this._tracksDraft = null; // settings: the Dark Day settings being changed
     this._track = loadPref("look-track", "normal"); // which track's looks the room page shows
+    this._lookLayer = loadPref("look-layer", "base"); // the room's looks, or Someone's there's
     this._scenePick = null; // {room, period, track}: choosing a scene for a look
     this._history = {}; // room id -> {hours, data | loading | error}
     this._notice = null;
@@ -513,17 +514,31 @@ class RoomRoutinesPanel extends HTMLElement {
 
   // ---- room detail ----
 
+  _layerOf(room) {
+    return room.has_sensors ? this._lookLayer : "base";
+  }
+
+  _layerTables(room, layer) {
+    return layer === "someone"
+      ? { looks: room.someone_looks || {}, dim: room.someone_dim_looks || {} }
+      : { looks: room.looks || {}, dim: room.dim_looks || {} };
+  }
+
   _detail(d, room) {
     const order = d.house.order;
     const lights = room.settings.lights;
     const track = this._track;
     const dim = track === "dim";
-    const table = dim ? room.dim_looks || {} : room.looks;
+    const layer = this._layerOf(room);
+    const someone = layer === "someone";
+    const T = this._layerTables(room, layer);
+    const table = dim ? T.dim : T.looks;
+    const same = (x) => x && x.room === room.id && x.track === track && (x.layer || "base") === layer;
     const rows = order
       .map((p) => {
         const own = table[p];
-        const editing = this._editLook && this._editLook.room === room.id && this._editLook.period === p && this._editLook.track === track;
-        const picking = this._scenePick && this._scenePick.room === room.id && this._scenePick.period === p && this._scenePick.track === track;
+        const editing = same(this._editLook) && this._editLook.period === p;
+        const picking = same(this._scenePick) && this._scenePick.period === p;
         const now = p === (room.period || d.house.period) && d.house.track === track;
         let cells;
         if (editing) cells = `<td colspan="${lights.length}">${this._lookEditor(room)}</td>`;
@@ -533,14 +548,15 @@ class RoomRoutinesPanel extends HTMLElement {
         else if (own) cells = lights.map((l) => `<td>${this._target(own.lights?.[l])}</td>`).join("");
         else if (dim) {
           const pct = d.house.tracks?.brightness_pct ?? 100;
-          const from = room.looks[p] ? p : this._borrowedFrom(order, room.looks, p);
-          const src = room.looks[p] ? "its Normal look" : `${esc(from || "—")}'s Normal look`;
-          const srcLook = from ? room.looks[from] : null;
+          const from = T.looks[p] ? p : this._borrowedFrom(order, T.looks, p);
+          const src = T.looks[p] ? "its Normal look" : from ? `${esc(from)}'s Normal look` : someone ? "the room's look" : "—";
+          const srcLook = from ? T.looks[from] : null;
           const note = pct !== 100 && srcLook?.scene && !this._sceneReadable(srcLook.scene) ? ` <span class="warntext" title="${esc(HUE_SCENE_NOTE)}">(a scene from another app: unchanged)</span>` : "";
           cells = `<td colspan="${lights.length}" class="muted">${pct !== 100 ? `Uses ${src} at ${esc(pct)} %${note}` : `Uses ${src}`}</td>`;
         } else {
-          const borrowed = this._borrowedFrom(order, room.looks, p);
-          cells = lights.map((l) => `<td class="muted">${borrowed ? `as ${esc(borrowed)}` : "—"}</td>`).join("");
+          const borrowed = this._borrowedFrom(order, T.looks, p);
+          if (!borrowed && someone) cells = `<td colspan="${lights.length}" class="muted">Not set: stays with the routine</td>`;
+          else cells = lights.map((l) => `<td class="muted">${borrowed ? `as ${esc(borrowed)}` : "—"}</td>`).join("");
         }
         return `<tr class="${now ? "nowrow" : ""}">
           <th class="periodcell"><div><span class="dot" style="background:${this._periodColour(p)}"></span>${esc(p)}${now ? ` <small>now</small>` : ""}</div>
@@ -549,12 +565,21 @@ class RoomRoutinesPanel extends HTMLElement {
         </tr>`;
       })
       .join("");
-    const trackTabs = `<div class="subtabs">
+    const layerTabs = room.has_sensors
+      ? `<div class="subtabs">
+      <button class="subtab ${!someone ? "on" : ""}" data-action="look-layer" data-layer="base"><ha-icon icon="mdi:lightbulb-outline"></ha-icon> Looks</button>
+      <button class="subtab ${someone ? "on" : ""}" data-action="look-layer" data-layer="someone"><ha-icon icon="mdi:walk"></ha-icon> Someone's there</button>
+    </div>`
+      : "";
+    const trackTabs = `${layerTabs}<div class="subtabs">
       ${Object.entries(TRACK_LABEL).map(([k, v]) => `<button class="subtab ${k === track ? "on" : ""}" data-action="look-track" data-track="${k}"><ha-icon icon="${TRACK_ICON[k]}"></ha-icon> ${v}s</button>`).join("")}
     </div>`;
-    const trackHelp = dim
+    const someoneHelp = someone
+      ? `<p class="explain"><b>Brighter while someone's there.</b> While the room's routine runs (started by a timer, a starter, a button or by hand), motion moves the lights set here to these looks; lights left out stay with the routine. When the room is empty again they fade back to the routine instead of going off. When the routine isn't running, motion uses these looks too. ${room.runs_ambient ? "" : "Setting any of these also means starting the routine keeps it running until it's stopped, instead of acting like a visit that switches off when the room is empty."}</p>`
+      : "";
+    const trackHelp = someoneHelp + (dim
       ? `<p class="explain">These looks are used on Dark Days${d.house.tracks?.enabled ? ` (in ${esc((d.house.tracks.periods || []).join(", ") || "no periods")}, when the sun is down or the light is below ${esc(d.house.tracks.dark_below_pct)} % of a clear day)` : ", once Dark Days are switched on under Settings → Dark Days"}. ${(d.house.tracks?.brightness_pct ?? 100) !== 100 ? `A period without its own Dark Day look uses its Normal one at ${esc(d.house.tracks.brightness_pct)} % brightness (lights set to their last brightness stay as they are)` : "A period without its own Dark Day look uses its Normal one"}, so only set the ones that should differ.</p>`
-      : `<p class="explain">What the lights do when the room's routine starts, in each period. A period without its own look uses the one before it. Set the lights how you want them and press <b>Save as now</b>: it becomes a Home Assistant scene you can also use on wall buttons. Or pick a scene you already have, or edit a look by hand.</p>`;
+      : `<p class="explain">What the lights do when the room's routine starts, in each period. A period without its own look uses the one before it. Set the lights how you want them and press <b>Save as now</b>: it becomes a Home Assistant scene you can also use on wall buttons. Or pick a scene you already have, or edit a look by hand.</p>`);
     const s = room.settings;
     return `
       <div class="detailhead">
@@ -703,7 +728,9 @@ class RoomRoutinesPanel extends HTMLElement {
   }
 
   _startLookEdit(room, period) {
-    const own = (this._track === "dim" ? room.dim_looks || {} : room.looks)[period];
+    const layer = this._layerOf(room);
+    const T = this._layerTables(room, layer);
+    const own = (this._track === "dim" ? T.dim : T.looks)[period];
     const lights = {};
     for (const l of room.settings.lights) {
       const t = own?.lights?.[l];
@@ -712,7 +739,7 @@ class RoomRoutinesPanel extends HTMLElement {
       else if (t.brightness_pct == null) lights[l] = { mode: "last", color_temp_kelvin: t.color_temp_kelvin, rgb: t.rgb };
       else lights[l] = { mode: "set", brightness_pct: Math.round(t.brightness_pct), color_temp_kelvin: t.color_temp_kelvin, rgb: t.rgb };
     }
-    this._editLook = { room: room.id, period, track: this._track, draft: { nothing: !!own?.nothing, lights } };
+    this._editLook = { room: room.id, period, track: this._track, layer, draft: { nothing: !!own?.nothing, lights } };
   }
 
   _lookFromDraft(draft) {
@@ -1505,9 +1532,9 @@ class RoomRoutinesPanel extends HTMLElement {
   // through the scene editor's own API, then points the look at it. Saving again
   // updates the same scene, keeping anything else added to it in the scene editor.
   // Returns the scene's name, or null (with a notice) if it didn't work.
-  async _saveScene(room, period, track, entities) {
+  async _saveScene(room, period, track, entities, layer = "base") {
     try {
-      const draft = await this._hass.callWS({ type: "room_routines/scene_draft", room_id: room.id, period, track });
+      const draft = await this._hass.callWS({ type: "room_routines/scene_draft", room_id: room.id, period, track, layer });
       if (!entities && !draft.any_on) {
         this._notice = { text: "None of the room's lights are on. Set them how you want them first, then press Save as now.", bad: true };
         return null;
@@ -1522,7 +1549,7 @@ class RoomRoutinesPanel extends HTMLElement {
         }
       }
       await this._hass.callApi("POST", `config/scene/config/${draft.config_id}`, config);
-      const res = await this._ws({ type: "room_routines/save_look", room_id: room.id, period, track, how: "scene", scene_id: draft.config_id });
+      const res = await this._ws({ type: "room_routines/save_look", room_id: room.id, period, track, layer, how: "scene", scene_id: draft.config_id });
       if (!res.ok) {
         this._notice = { text: res.error, bad: true };
         return null;
@@ -1562,6 +1589,12 @@ class RoomRoutinesPanel extends HTMLElement {
       case "hold-track":
         await this._call("select", "select_option", { entity_id: d.house.track_entity, option: el.value });
         return;
+      case "look-layer":
+        this._lookLayer = el.dataset.layer;
+        savePref("look-layer", this._lookLayer);
+        this._editLook = this._scenePick = null;
+        this._render();
+        return;
       case "look-track":
         this._track = el.dataset.track;
         savePref("look-track", this._track);
@@ -1570,13 +1603,13 @@ class RoomRoutinesPanel extends HTMLElement {
         return;
       case "look-scene-now": {
         const period = el.dataset.period;
-        const ok = await this._saveScene(room, period, this._track, null);
+        const ok = await this._saveScene(room, period, this._track, null, this._layerOf(room));
         if (ok) this._notice = { text: `Saved the lights as the ${period} look${this._track === "dim" ? " for Dark Days" : ""}, as the scene "${ok}".` };
         this._render();
         return;
       }
       case "look-pick-scene":
-        this._scenePick = { room: room.id, period: el.dataset.period, track: this._track };
+        this._scenePick = { room: room.id, period: el.dataset.period, track: this._track, layer: this._layerOf(room) };
         this._render();
         return;
       case "scene-pick-cancel":
@@ -1588,7 +1621,7 @@ class RoomRoutinesPanel extends HTMLElement {
         const scene = this.shadowRoot.querySelector("[data-scene-choice]")?.value;
         if (!scene) return;
         const res = await this._ws(
-          { type: "room_routines/save_look", room_id: pick.room, period: pick.period, track: pick.track, how: "scene", scene },
+          { type: "room_routines/save_look", room_id: pick.room, period: pick.period, track: pick.track, layer: pick.layer || "base", how: "scene", scene },
           `${pick.period}${pick.track === "dim" ? " on Dark Days" : ""} now turns on ${this._name(scene)}.`
         );
         if (res.ok) this._scenePick = null;
@@ -1678,7 +1711,7 @@ class RoomRoutinesPanel extends HTMLElement {
       case "look-save": {
         const e = this._editLook;
         const res = await this._ws(
-          { type: "room_routines/save_look", room_id: e.room, period: e.period, track: e.track, how: "custom", look: this._lookFromDraft(e.draft) },
+          { type: "room_routines/save_look", room_id: e.room, period: e.period, track: e.track, layer: e.layer || "base", how: "custom", look: this._lookFromDraft(e.draft) },
           `Saved the ${e.period} look${e.track === "dim" ? " for Dark Days" : ""}.`
         );
         if (res.ok) this._editLook = null;
@@ -1697,7 +1730,7 @@ class RoomRoutinesPanel extends HTMLElement {
           nothing: `${room.name} stays dark in ${period}${dim ? " on Dark Days" : ""}.`,
           borrow: dim ? `${period} now uses its Normal look on Dark Days.` : `${period} now uses the previous period's look.`,
         }[how];
-        const res = await this._ws({ type: "room_routines/save_look", room_id: room.id, period, track: this._track, how }, text);
+        const res = await this._ws({ type: "room_routines/save_look", room_id: room.id, period, track: this._track, layer: this._layerOf(room), how }, text);
         if (!res.ok) this._notice = { text: res.error, bad: true };
         this._render();
         return;

@@ -30,6 +30,8 @@ The config entry's options hold plain JSON:
                      "scene": "scene.x" | "period": "Overnight", "max_pct": 20}, ...],
           "looks": {"<period>": {"nothing": true} | {"scene": "scene.x"} | {"lights": {...}, "blinds": {...}}},
           "dim_looks": {"<period>": ...}   (same form; the Dark Day track)
+          "someone_looks": {...}, "someone_dim_looks": {...}
+                                   (optional: while someone's there, over a running routine)
         }
       }
     }
@@ -163,6 +165,8 @@ def room_from(data: Mapping[str, Any]) -> RoomConfig:
         holds=tuple(data.get("holds") or ()),
         looks={period: look_from(look) for period, look in (data.get("looks") or {}).items()},
         dim_looks={period: look_from(look) for period, look in (data.get("dim_looks") or {}).items()},
+        someone_looks={p: look_from(look) for p, look in (data.get("someone_looks") or {}).items()},
+        someone_dim_looks={p: look_from(look) for p, look in (data.get("someone_dim_looks") or {}).items()},
         threshold_lux=None if threshold is None else float(threshold),
         timeout=timedelta(seconds=data.get("timeout_s", DEFAULT_TIMEOUT_S)),
         cooldown=timedelta(seconds=data.get("cooldown_s", DEFAULT_COOLDOWN_S)),

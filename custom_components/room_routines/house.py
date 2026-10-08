@@ -268,7 +268,9 @@ class RoomRunner:
         owned_at = dt_util.parse_datetime(memory.get("owned_at") or "")
         if owned_at is not None and now - owned_at > MAX_REMEMBERED_AGE:
             owned_at = now
-        self._run(self.room.restore(owned_at, bool(memory.get("paused")), now))
+        self._run(self.room.restore(
+            owned_at, bool(memory.get("paused")), now, memory.get("ambient"), memory.get("someone")
+        ))
 
     def _persist(self) -> None:
         """Remember whether the routine is running, for the next restart."""
@@ -842,7 +844,10 @@ def structure(options: Mapping[str, Any]) -> dict[str, Any]:
     the house can take them without a reload (and without forgetting which
     lights it switched on)."""
     rooms = {
-        room_id: {k: v for k, v in data.items() if k not in ("looks", "dim_looks")}
+        room_id: {
+            k: v for k, v in data.items()
+            if k not in ("looks", "dim_looks", "someone_looks", "someone_dim_looks")
+        }
         for room_id, data in (options.get("rooms") or {}).items()
     }
     return {**options, "rooms": rooms}

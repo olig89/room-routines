@@ -176,6 +176,11 @@ def room_snapshot(hass: HomeAssistant, runner: RoomRunner) -> dict[str, Any]:
         },
         "looks": dict(stored.get("looks") or {}),
         "dim_looks": dict(stored.get("dim_looks") or {}),
+        "someone_looks": dict(stored.get("someone_looks") or {}),
+        "someone_dim_looks": dict(stored.get("someone_dim_looks") or {}),
+        # Starting the routine runs it until stopped (not a visit that times out).
+        "runs_ambient": runner.config.runs_ambient,
+        "layer": runner.layer(),
         "suggestions": [_suggestion(s) for s in house.suggestions(runner)],
         "hand_changes_28d": sum(
             1 for c in house.changes if c.room_id == runner.room_id and now - c.at <= timedelta(days=28)
@@ -282,6 +287,7 @@ async def _scene_entity(hass: HomeAssistant, config_id: str) -> str | None:
         vol.Required("room_id"): str,
         vol.Required("period"): str,
         vol.Optional("track", default=NORMAL): vol.In(list(TRACKS)),
+        vol.Optional("layer", default="base"): vol.In(["base", "someone"]),
         # "custom" stores ``look``; "current" takes the lights as they are now;
         # "scene" turns on ``scene`` (an entity) or ``scene_id`` (a scene just
         # saved through Home Assistant's scene API); "nothing" keeps the room
@@ -317,12 +323,12 @@ async def ws_save_look(hass: HomeAssistant, connection: websocket_api.ActiveConn
         look = None
     house = _house(hass)  # the options may have moved on while waiting
     try:
-        options = set_look(house.entry.options, msg["room_id"], msg["period"], look, msg["track"])
+        options = set_look(house.entry.options, msg["room_id"], msg["period"], look, msg["track"], msg["layer"])
     except SettingsError as err:
         _error(connection, msg, err)
         return
     _save(hass, house, options)
-    key = "dim_looks" if msg["track"] == DIM else "looks"
+    key = ("someone_" if msg["layer"] == "someone" else "") + ("dim_looks" if msg["track"] == DIM else "looks")
     connection.send_result(msg["id"], {"look": options["rooms"][msg["room_id"]].get(key, {}).get(msg["period"])})
 
 
@@ -332,6 +338,7 @@ async def ws_save_look(hass: HomeAssistant, connection: websocket_api.ActiveConn
         vol.Required("room_id"): str,
         vol.Required("period"): str,
         vol.Optional("track", default=NORMAL): vol.In(list(TRACKS)),
+        vol.Optional("layer", default="base"): vol.In(["base", "someone"]),
     }
 )
 @callback
@@ -344,9 +351,10 @@ def ws_scene_draft(hass: HomeAssistant, connection: websocket_api.ActiveConnecti
     if runner is None:
         connection.send_error(msg["id"], "unknown_room", "No such room")
         return
-    period, track = msg["period"], msg["track"]
+    period, track, someone = msg["period"], msg["track"], msg["layer"] == "someone"
     stored = (house.options.get("rooms") or {}).get(runner.room_id, {})
-    own = (stored.get("dim_looks" if track == DIM else "looks") or {}).get(period) or {}
+    key = ("someone_" if someone else "") + ("dim_looks" if track == DIM else "looks")
+    own = (stored.get(key) or {}).get(period) or {}
     config_id = None
     if scene := own.get("scene"):
         state = hass.states.get(scene)
@@ -355,9 +363,9 @@ def ws_scene_draft(hass: HomeAssistant, connection: websocket_api.ActiveConnecti
     connection.send_result(
         msg["id"],
         {
-            "config_id": config_id or f"{DOMAIN}_{runner.room_id}_{slugify(period)}_{track}",
+            "config_id": config_id or f"{DOMAIN}_{runner.room_id}_{slugify(period)}_{track}{'_someone' if someone else ''}",
             "existing": bool(config_id),
-            "name": f"{runner.config.name} · {period}{' · ' + TRACK_LABELS[DIM] if track == DIM else ''}",
+            "name": f"{runner.config.name} · {period}{' · ' + TRACK_LABELS[DIM] if track == DIM else ''}{' · Someone' + chr(39) + 's there' if someone else ''}",
             "entities": entities,
             "any_on": any(e.get("state") == "on" for e in entities.values()),
         },
