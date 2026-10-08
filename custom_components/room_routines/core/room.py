@@ -766,6 +766,7 @@ class Room:
         self.ambient_on, self.someone_on = bool(ambient), bool(someone)
         self.owned_at = owned_at or now
         self.paused = paused
+        self._note_someone_lit()
         decision = self._restyle("picked up again after a restart", blinds=False, now=now)
         if self.unheard & (set(self.config.triggers) | set(self.config.holds)):
             # A presence sensor that hasn't reported yet reads as "nobody": until each
@@ -862,6 +863,7 @@ class Room:
             self.ambient_on, self.someone_on = True, someone
         else:
             self.someone_on = True
+        self._note_someone_lit()  # a visit the routine starts under: its lights are Someone's
         look, factor, name = self._target(now)
         decision = self._decide(f"{why}: {name}", ApplyLook(look, self._power_for(look), factor=factor))
         countdown = self._check_timer(now)

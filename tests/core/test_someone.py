@@ -230,3 +230,29 @@ def test_emptying_over_a_do_nothing_period_switches_off_what_was_lit():
     d = room.tick(at(28, 18, 32))
     (off,) = [a for a in d.actions if isinstance(a, TurnOff)]
     assert off.lights == (CEILING,) and not [a for a in d.actions if isinstance(a, ApplyLook)]
+
+
+def test_a_visit_the_routine_starts_under_hands_back_what_it_lit():
+    room = make(hall(
+        lights=(CEILING, LAMP),
+        looks={"Morning": Look({CEILING: DIM})},
+        someone_looks={"Evening": Look({CEILING: BRIGHT, LAMP: BRIGHT})},
+    ))
+    room.sensor(MOTION, True, at(28, 18))  # a visit: both lights on
+    room.start(at(28, 18, 1), "timer at 18:01")  # the routine starts under it
+    room.sensor(MOTION, False, at(28, 18, 2))
+    d = room.tick(at(28, 18, 3))
+    assert applied(d).look == Look({CEILING: DIM})
+    (off,) = [a for a in d.actions if isinstance(a, TurnOff)]
+    assert off.lights == (LAMP,)
+
+
+def test_a_boost_picked_up_after_a_restart_hands_back_what_it_lit():
+    config = hall(lights=(CEILING, LAMP), looks={"Morning": Look({CEILING: DIM})},
+                  someone_looks={"Evening": Look({CEILING: BRIGHT, LAMP: BRIGHT})})
+    after = Room(config, default_schedule(), "Evening", True, at(28, 19))
+    after.restore(at(28, 18), False, at(28, 19), True, True)
+    after.sensor(MOTION, False, at(28, 19, 1))
+    d = after.tick(at(28, 19, 2))
+    (off,) = [a for a in d.actions if isinstance(a, TurnOff)]
+    assert off.lights == (LAMP,)
