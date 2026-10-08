@@ -535,7 +535,8 @@ class Room:
             plain = self._plain(look, factor)
             kept = set(plain.lit()) if plain is not None else set(self.config.switchable())
         out = tuple(l for l in self.config.switchable() if l in self.someone_lit and l not in kept)
-        self.someone_lit.clear()
+        # A light held by hand keeps that note: when its hold ends it goes off then.
+        self.someone_lit = {l for l in self.someone_lit if l in self.hand}
         return out
 
     def _someone_lit(self) -> set[str] | None:
@@ -622,6 +623,8 @@ class Room:
             if lights is None:
                 # A scene that can't be read (another app's): turn it on, then put
                 # the signals back on the lights it may have changed.
+                if self.hand:
+                    return []  # it would change lights left as set by hand: leave the room as it is
                 return [action, *self._signal_actions(list(self.held), flash=False)] if self.held else [action]
             look = scaled(Look(dict(lights)), action.factor)
             action = replace(action, factor=1.0)
@@ -837,8 +840,11 @@ class Room:
             self.hand = {l: u for l, u in hand.items() if l in switchable and (u is None or u > now)}
         elif paused:
             self.hand = {light: None for light in switchable}  # memory from before per-light holds
+        if self.config.hand_hold == FOR_MINUTES:
+            # A hold by minutes with no time (old memory, an unreadable one): from now.
+            self.hand = {l: u if u is not None else self._hand_until(now) for l, u in self.hand.items()}
         self._note_someone_lit()
-        decision = self._restyle("picked up again after a restart", blinds=False, now=now)
+        decision = self._restyle("picked up again after a restart", blinds=False, now=now, release=False)
         if self.unheard & (set(self.config.triggers) | set(self.config.holds)):
             # A presence sensor that hasn't reported yet reads as "nobody": until each
             # one reports (or UNHEARD_FOR passes), it counts as someone being there.
@@ -849,7 +855,9 @@ class Room:
             )
         countdown = self._check_timer(now)
         if countdown is not None:
-            return self._decide(f"{decision.reason}; {countdown.reason}", *decision.actions, *countdown.actions)
+            decision = self._decide(f"{decision.reason}; {countdown.reason}", *decision.actions, *countdown.actions)
+        if (wake := self.next_wake()) is not None:
+            decision = self._decide(decision.reason, *decision.actions, WakeAt(wake))
         return decision
 
     # -- events --
@@ -859,6 +867,9 @@ class Room:
         self.sensors[entity] = on
         self.unheard.discard(entity)
         is_trigger = entity in self.config.triggers
+        if entity in self.config.ends and was and not on and self.state is State.OWNED and self.someone_on:
+            # This sensor ends a visit (a door closing): lights off at once.
+            return self._empty(now, None, f"{entity} went off", f"{entity} went off: lights off at once")
         if self.stealth:
             return self._check_timer(now) or self._decide("stealth mode: motion ignored")
         if self.state is State.MANUAL:
@@ -867,9 +878,6 @@ class Room:
             if not (on and not was and is_trigger):
                 return self._decide("idle")
             return self._switch_on(entity, now)
-        if entity in self.config.ends and was and not on and self.someone_on:
-            # This sensor ends a visit (a door closing): lights off at once.
-            return self._empty(now, None, f"{entity} went off", f"{entity} went off: lights off at once")
         if on and not was and is_trigger and not self.someone_on and self.ambient_on:
             return self._boost(entity, now)
         return self._check_timer(now) or self._decide(
@@ -1019,9 +1027,10 @@ class Room:
         self.track = track
         return self._restyle(TRACK_LABELS.get(track, track), blinds=False, now=now)
 
-    def _restyle(self, reason: str, blinds: bool, now: datetime) -> Decision:
-        """The look changed under the room: move a lit room to it."""
-        if self._moves_on():
+    def _restyle(self, reason: str, blinds: bool, now: datetime, release: bool = True) -> Decision:
+        """The look changed under the room: move a lit room to it. ``release`` False
+        when nothing really moved on (picking up after a restart)."""
+        if release and self._moves_on():
             reason += " (changes by hand let go)"
         look = self._look()
         actions: list[Action] = []
@@ -1113,7 +1122,8 @@ class Room:
         if expired:
             for light in expired:
                 del self.hand[light]
-            if self.state is State.OWNED:
+            going_dark = self.deadline is not None and now >= self.deadline and not self.occupied()
+            if self.state is State.OWNED and not going_dark:
                 return self._rejoin(expired, now)
         if self.state is not State.OWNED or self.deadline is None or now < self.deadline:
             return self._unchanged()
@@ -1126,19 +1136,35 @@ class Room:
     def _rejoin(self, lights: list[str], now: datetime) -> Decision:
         """Lights held by hand go back to what the room is doing."""
         look, factor, name = self._target(now)
+        # Lights Someone's there lit that the routine doesn't want go off now.
+        theirs = [light for light in lights if light in self.someone_lit]
         if look.nothing:
+            self.someone_lit -= set(theirs)
+            if theirs:
+                return self._decide(f"change by hand over: {name} is 'do nothing', so what was lit goes off",
+                                    TurnOff(tuple(theirs), self.config.drift))
             return self._decide(f"change by hand over: {name} is 'do nothing', lights left as they are")
         plain = self._plain(look, factor)
         if plain is None:
+            if self.hand:
+                return self._decide(f"change by hand over, but the {name} is a scene that can't be read "
+                                    "and other lights are still left as set: nothing changed")
             # A scene that can't be read: send it whole (the other lights already show it).
             return self._decide(f"change by hand over: back to the {name}",
                                 ApplyLook(look, self._power_for(look), self.config.drift, factor))
+        lit = set(plain.lit())
+        off = tuple(light for light in theirs if light not in lit)
+        self.someone_lit -= set(off)
         back = {light: t for light, t in plain.lights.items() if light in lights}
-        if not back:
+        actions: list[Action] = []
+        if back:
+            rejoin = Look(back)
+            actions.append(ApplyLook(rejoin, self._power_for(rejoin), self.config.drift))
+        if off:
+            actions.append(TurnOff(off, self.config.drift))
+        if not actions:
             return self._decide(f"change by hand over: the {name} leaves those lights alone")
-        rejoin = Look(back)
-        return self._decide(f"change by hand over: back to the {name}{self._hand_tail()}",
-                            ApplyLook(rejoin, self._power_for(rejoin), self.config.drift))
+        return self._decide(f"change by hand over: back to the {name}{self._hand_tail()}", *actions)
 
     def _empty(self, now: datetime, fade: timedelta | None, why: str, off_reason: str) -> Decision:
         """Nobody's there any more: back to the routine, or lights off."""

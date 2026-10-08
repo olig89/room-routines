@@ -373,3 +373,28 @@ async def test_a_light_changed_by_hand_for_minutes_goes_back_on_time(hass, light
     assert room(hass).hand == {}
     assert lights.of("turn_on")[-1]["entity_id"] == LAMP
     assert lights.of("turn_on")[-1]["brightness_pct"] == 30
+
+
+async def test_a_stepped_drift_leaves_a_light_changed_by_hand_and_carries_on_with_the_rest(hass, lights, freezer):
+    """Lights that can't fade themselves drift in steps: a hand change stops the
+    steps for that light only, and another light's rejoin doesn't freeze them."""
+    await setup(hass, lights=[PLAY, LAMP], blends={}, hand_hold="minutes", hand_minutes=1,
+                looks={"Morning": {"lights": {PLAY: {"on": True, "brightness_pct": 80}, LAMP: {"on": True, "brightness_pct": 80}}},
+                       "Evening": {"lights": {PLAY: {"on": True, "brightness_pct": 10}, LAMP: {"on": True, "brightness_pct": 10}}}})
+    hass.states.async_set(PLAY, "off")  # no transition support: stepped fades
+    hass.states.async_set(LAMP, "off")
+    await hass.async_block_till_done()
+    await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
+    await hass.async_block_till_done()
+    # 18:00 the office's Evening: a 90 s stepped drift for both.
+    await at(hass, freezer, "2026-09-28 15:00:01+00:00")
+    await at(hass, freezer, "2026-09-28 15:00:20+00:00")
+    hass.states.async_set(LAMP, "on", {"brightness": 255})  # someone turns the lamp up mid-drift
+    await hass.async_block_till_done()
+    assert LAMP in room(hass).hand
+    before = len([c for c in lights.of("turn_on") if c["entity_id"] == LAMP])
+    await at(hass, freezer, "2026-09-28 15:00:50+00:00")
+    assert len([c for c in lights.of("turn_on") if c["entity_id"] == LAMP]) == before  # no more steps for it
+    play_steps = len([c for c in lights.of("turn_on") if c["entity_id"] == PLAY])
+    await at(hass, freezer, "2026-09-28 15:01:35+00:00")
+    assert len([c for c in lights.of("turn_on") if c["entity_id"] == PLAY]) > play_steps  # still drifting

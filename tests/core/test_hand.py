@@ -226,3 +226,60 @@ def test_without_ends_the_door_closing_waits_for_the_motion():
 def test_only_the_rooms_own_sensors_can_end_a_visit():
     with pytest.raises(ValueError):
         pantry(ends=("binary_sensor.somewhere_else",))
+
+
+# ---- from the review --------------------------------------------------------
+
+
+def test_a_restart_asks_to_be_woken_for_a_hold_by_minutes():
+    after = Room(office(hand_hold=FOR_MINUTES), default_schedule(), "Day", True, at(5, 11, 5))
+    d = after.restore(at(5, 10), False, at(5, 11, 5), True, False, {A: at(5, 11, 20)})
+    assert WakeAt(at(5, 11, 20)) in d.actions
+
+
+def test_a_restart_doesnt_let_go_of_holds_until_the_routine_moves_on():
+    after = Room(office(hand_hold=MOVES_ON), default_schedule(), "Day", True, at(5, 11, 5))
+    d = after.restore(at(5, 10), False, at(5, 11, 5), True, False, {A: None})
+    assert after.hand == {A: None}
+    assert all(A not in a.look.lights for a in applied(d))
+
+
+def test_old_paused_memory_in_a_minutes_room_counts_from_the_restart():
+    after = Room(office(hand_hold=FOR_MINUTES, hand_minutes=20), default_schedule(), "Day", True, at(5, 11))
+    after.restore(at(5, 10), True, at(5, 11))
+    assert after.hand == {A: at(5, 11, 20), B: at(5, 11, 20)}
+
+
+def test_a_held_light_someone_lit_goes_off_when_its_hold_ends():
+    C = "light.extra"
+    hall = office(
+        lights=(A, C), triggers=(MOTION,), threshold_lux=None, timers=(Timer(time(10, 0)),),
+        hand_hold=FOR_MINUTES, hand_minutes=30,
+        looks={"Morning": Look({A: LightTarget(True, 5)})},
+        someone_looks={"Day": Look({A: LightTarget(True, 70), C: LightTarget(True, 70)})},
+    )
+    room = started(hall)
+    room.sensor(MOTION, True, at(5, 10, 1))
+    room.lights(True, own=False, now=at(5, 10, 2), light=C)
+    room.sensor(MOTION, False, at(5, 10, 3))
+    d = room.tick(at(5, 10, 4))
+    assert not any(isinstance(a, TurnOff) and C in a.lights for a in d.actions)  # held: left on
+    d = room.tick(at(5, 10, 32))
+    assert any(isinstance(a, TurnOff) and C in a.lights for a in d.actions)
+
+
+def test_an_unreadable_scene_doesnt_override_a_held_light():
+    room = Room(office(looks={"Morning": FOCUS, "Evening": Look(scene="scene.hue_evening")}),
+                default_schedule(), "Day", False, at(5, 10), scene_reader=lambda s: None)
+    room.start(at(5, 10), "button")
+    room.lights(True, own=False, now=at(5, 11), light=A)
+    d = room.period_changed("Evening", at(5, 18))
+    assert not applied(d)
+
+
+def test_a_door_closing_switches_off_at_once_in_stealth_mode_too():
+    room = Room(pantry(), default_schedule(), "Day", False, at(5, 10))
+    room.sensor(DOOR, True, at(5, 10))
+    room.set_stealth(True, at(5, 10, 0, 5))
+    d = room.sensor(DOOR, False, at(5, 10, 0, 10))
+    assert room.state is State.IDLE and any(isinstance(a, TurnOff) for a in d.actions)

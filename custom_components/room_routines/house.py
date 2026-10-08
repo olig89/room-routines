@@ -148,6 +148,8 @@ class RoomRunner:
         self._wake: CALLBACK_TYPE | None = None
         self._wake_at: datetime | None = None
         self._fades: list[CALLBACK_TYPE] = []
+        # Bumped for a light when a new command for it stops its fade.
+        self._fade_gen: dict[str, int] = {}
         # Brightness each light had before a stepped fade-out. A light that
         # remembers its last level (a KNX DALI light) would otherwise come back
         # at the dimmed level the fade left it at.
@@ -217,9 +219,22 @@ class RoomRunner:
             self._pending_change = None
         self._cancel_fades()
 
-    def _cancel_fades(self) -> None:
-        while self._fades:
-            self._fades.pop()()
+    def _cancel_fades(self, lights: tuple[str, ...] | None = None) -> None:
+        """Stop fades under way: every light's, or only these lights'."""
+        if lights is None:
+            while self._fades:
+                self._fades.pop()()
+            return
+        for light in lights:
+            self._fade_gen[light] = self._fade_gen.get(light, 0) + 1
+
+    def _lights_of(self, action: ApplyLook | TurnOff) -> tuple[str, ...] | None:
+        """The lights a command changes (None: can't tell, a scene from another app)."""
+        if isinstance(action, TurnOff):
+            return action.lights
+        if action.look.scene:
+            return None
+        return tuple(action.look.lights)
 
     def _build(self) -> None:
         """A fresh core room, from the lights and sensors as they are now."""
@@ -612,7 +627,7 @@ class RoomRunner:
                 # A new instruction replaces any fade still under way (someone
                 # walking back in during a fade-out brings the lights back). A
                 # signal's own command doesn't: the other lights carry on fading.
-                self._cancel_fades()
+                self._cancel_fades(self._lights_of(action))
             if isinstance(action, ApplyLook):
                 self.hass.async_create_task(self._apply(action))
             elif isinstance(action, TurnOff):
@@ -622,6 +637,7 @@ class RoomRunner:
         if acting:
             prefix = "" if self.mode == MODE_LIVE else "Log only: would act. "
             self.hass.async_create_task(self._log(prefix + decision.reason))
+        self._arm(None)  # whatever the room now waits for (a hold by minutes after a restart)
         self._persist()
         self._notify()
 
@@ -805,12 +821,15 @@ class RoomRunner:
             state = self.hass.states.get(light)
             on = state is not None and state.state == STATE_ON
             current[light] = (brightness_pct(state) or 100.0) if on else None
+        gens = {light: self._fade_gen.get(light, 0) for light in targets}
         for offset, sends in plan_fade(current, Look(dict(targets)), duration):
             @callback
             def _step(_now, sends=sends) -> None:
                 for light, target in sends.items():
-                    if self.room is not None and light in self.room.held:
-                        continue  # a signal took it during the fade
+                    if self._fade_gen.get(light, 0) != gens[light]:
+                        continue  # a newer command for this light stopped its fade
+                    if self.room is not None and (light in self.room.held or light in self.room.hand):
+                        continue  # a signal took it, or someone changed it by hand
                     self.hass.async_create_task(self._send(light, target))
 
             self._fades.append(async_call_later(self.hass, offset.total_seconds(), _step))
