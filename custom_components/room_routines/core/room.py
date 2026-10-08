@@ -86,7 +86,7 @@ from .lux import AmbientTracker, dark_enough
 from .periods import Schedule
 from .rules import CAP, LOOK, NOTHING, Condition, Rule
 from .timers import Timer
-from .tracks import NORMAL, TRACK_LABELS
+from .tracks import DIM, NORMAL, TRACK_LABELS
 
 LEAVE = "leave"
 ROUTINE = "routine"
@@ -244,6 +244,9 @@ class Room:
         # on, so it never switches off what it didn't switch on.
         self.state = State.MANUAL if lights_on else State.IDLE
         self.sensors: dict[str, bool] = {}
+        # Sensors with no real state yet (just after a restart): a picked-up room
+        # doesn't count down on them until they report.
+        self.unheard: set[str] = set()
         self.deadline: datetime | None = None
         self.cooldown_until: datetime | None = None
         self.stealth = stealth
@@ -431,9 +434,10 @@ class Room:
         self._last_blend = None
 
     def has_any_look(self) -> bool:
-        """Whether any period gives the lights something to do (on a Normal day)."""
+        """Whether any period gives the lights something to do, on either kind of day."""
         return any(
-            not resolve(p, NORMAL, self.config.looks, self.config.dim_looks, self.schedule).look.nothing
+            not resolve(p, track, self.config.looks, self.config.dim_looks, self.schedule).look.nothing
+            for track in (NORMAL, DIM)
             for p in self.schedule.order()
         )
 
@@ -462,6 +466,10 @@ class Room:
         self.owned_at = owned_at or now
         self.paused = paused
         decision = self._restyle("picked up again after a restart", blinds=False, now=now)
+        if self.unheard:
+            # A presence sensor that hasn't reported yet reads as "nobody": don't
+            # switch off on someone sitting still. Its first report decides.
+            return self._decide(f"{decision.reason}; waiting for the sensors to report", *decision.actions)
         countdown = self._check_timer(now)
         if countdown is not None:
             return self._decide(f"{decision.reason}; {countdown.reason}", *decision.actions, *countdown.actions)
@@ -472,6 +480,7 @@ class Room:
     def sensor(self, entity: str, on: bool, now: datetime) -> Decision:
         was = self.sensors.get(entity, False)
         self.sensors[entity] = on
+        self.unheard.discard(entity)
         is_trigger = entity in self.config.triggers
         if self.stealth:
             return self._check_timer(now) or self._decide("stealth mode: motion ignored")

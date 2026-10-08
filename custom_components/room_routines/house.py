@@ -100,6 +100,9 @@ STORE_VERSION = 1
 # After a restart, how long a room waits for its lights to come back before it
 # stops trying to pick its routine up again (lights reporting late, as KNX can).
 RESTORE_GRACE = timedelta(minutes=5)
+# A routine remembered from longer ago than this counts as started at the restart
+# (so habits don't read a days-long downtime as time with the lights on).
+MAX_REMEMBERED_AGE = timedelta(days=1)
 SCENE_PLATFORM = "homeassistant_scene"  # Home Assistant's own (YAML / editor) scenes
 
 
@@ -154,6 +157,7 @@ class RoomRunner:
         self._restore_until: datetime | None = None
         self._memory_read = False
         self._room_mode: str | None = None  # the mode the current core room was built for
+        self._grace_end: CALLBACK_TYPE | None = None
         # The room's own rules first, then the house's that cover it.
         self.rules: tuple[Rule, ...] = tuple(self.config.rules) + tuple(
             r for r in house.house_rules if r.applies_to(self.room_id)
@@ -163,7 +167,8 @@ class RoomRunner:
 
     @callback
     def start(self) -> None:
-        self._build()
+        if self.room is None or self._room_mode != self.mode:
+            self._build()  # the mode select may already have built it
         sensors = list(self.config.triggers) + list(self.config.holds)
         if sensors:
             self._unsubs.append(async_track_state_change_event(self.hass, sensors, self._on_sensor))
@@ -187,6 +192,9 @@ class RoomRunner:
     @callback
     def stop(self) -> None:
         self._cancel_timers()
+        if self._grace_end:
+            self._grace_end()
+            self._grace_end = None
         while self._unsubs:
             self._unsubs.pop()()
 
@@ -215,6 +223,10 @@ class RoomRunner:
             self._memory_read = True
             self._restore = self.house.room_memory.get(self.room_id)
             self._restore_until = now + RESTORE_GRACE if self._restore else None
+            if self._restore:
+                self._grace_end = async_call_later(
+                    self.hass, RESTORE_GRACE.total_seconds() + 1, self._grace_over
+                )
         elif self.room is not None and self._room_mode == MODE_LIVE and self.mode == MODE_LIVE:
             # Rebuilt while live: a running routine carries on, as after a restart.
             if (carry := self.room.memory()) is not None:
@@ -229,12 +241,22 @@ class RoomRunner:
         for sensor in (*self.config.triggers, *self.config.holds):
             state = self.hass.states.get(sensor)
             self.room.sensors[sensor] = state is not None and state.state == STATE_ON
+            if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+                self.room.unheard.add(sensor)
         rule, rule_text, unmet_text = self._context(self._states())
         self.room.rule, self.room.rule_text, self.room.unmet_text = rule, rule_text, unmet_text
         self._offer_lux(self.hass.states.get(self.lux_sensor) if self.lux_sensor else None, now)
         self._try_restore(now)
         self._persist()
         self._notify()
+
+    @callback
+    def _grace_over(self, _now: datetime) -> None:
+        """Nothing picked the routine up in time: forget it and save what's true now."""
+        self._grace_end = None
+        if self._restore is not None:
+            self._restore = None
+            self._persist()
 
     def _try_restore(self, now: datetime) -> None:
         """Pick up a routine that was running before the restart, once the room is
@@ -248,6 +270,8 @@ class RoomRunner:
             return  # lights not back yet (or off): keep waiting until the grace ends
         memory, self._restore = self._restore, None
         owned_at = dt_util.parse_datetime(memory.get("owned_at") or "")
+        if owned_at is not None and now - owned_at > MAX_REMEMBERED_AGE:
+            owned_at = now
         self._run(self.room.restore(owned_at, bool(memory.get("paused")), now))
 
     def _persist(self) -> None:
@@ -321,9 +345,11 @@ class RoomRunner:
         if not own:
             self._before_fade.pop(entity, None)  # a person's level wins from now on
         self._run(self.room.lights(self._any_on(), own, now))
-        old = event.data.get("old_state")
-        if self._restore is not None and (old is None or old.state in (STATE_UNAVAILABLE, STATE_UNKNOWN)):
-            self._try_restore(now)  # a light reporting in after the restart
+        if self._restore is not None and on:
+            # A light reporting in after the restart. KNX lights come back "off"
+            # until their bus read answers, then "on", so any switch-on inside the
+            # grace counts, whatever the state before it.
+            self._try_restore(now)
 
     @callback
     def _on_lux(self, event: Event[EventStateChangedData]) -> None:
@@ -871,7 +897,9 @@ class House:
                 continue
         self.dismissed = dict(data.get("dismissed") or {})
         rooms = await self._rooms_store.async_load() or {}
-        self.room_memory = {k: v for k, v in (rooms.get("rooms") or {}).items() if isinstance(v, dict)}
+        self.room_memory = {
+            k: v for k, v in (rooms.get("rooms") or {}).items() if isinstance(v, dict) and k in self.rooms
+        }
         daylight = await self._daylight_store.async_load() or {}
         for sensor, row in (daylight.get("sensors") or {}).items():
             try:

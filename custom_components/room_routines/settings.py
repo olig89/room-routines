@@ -235,17 +235,20 @@ def set_periods(
     names = {r["name"] for r in clean_rows}
     renames = dict(renames or {})
     for room in out[CONF_ROOMS].values():
+        before = {k: dict(room.get(k) or {}) for k in list(room) if k.endswith("looks")}
         for key in LOOK_KEYS.values():
             if key not in room:
                 continue
             looks: dict[str, Any] = {}
-            old_looks = room.get(key) or {}
+            old_looks = before.get(key) or {}
+            # A Dark Day look stops at a period's own Normal look too.
+            normal = before.get(key.replace("dim_looks", "looks")) if "dim_looks" in key else None
             # Built fresh rather than edited in place, so two periods can swap names.
             for period, look in old_looks.items():
                 target = renames.get(period, period)
                 if target and target in names:
                     looks[target] = look
-            _carry_removed(old_order, old_looks, looks, renames, names)
+            _carry_removed(old_order, old_looks, looks, renames, names, normal)
             room[key] = looks
         # A room's own times and blends follow the period too.
         for key in ("blends", "period_starts"):
@@ -289,13 +292,19 @@ def _carry_removed(
     looks: dict[str, Any],
     renames: Mapping[str, str | None],
     names: set[str],
+    normal: Mapping[str, Any] | None = None,
 ) -> None:
     """Give each removed period's look to the next surviving period that used it.
 
     A period without a look of its own uses the one before it, so the periods
-    after a removed one were showing its look; the first of them keeps it.
+    after a removed one were showing its look; the first of them keeps it. For
+    Dark Day looks, ``normal`` is the Normal looks: a period with its own Normal
+    look never used an earlier Dark Day look.
     """
     n = len(old_order)
+
+    def own(p: str) -> bool:
+        return p in old_looks or (normal is not None and p in normal)
 
     def survivor(p: str) -> str | None:
         target = renames.get(p, p)
@@ -307,10 +316,10 @@ def _carry_removed(
         for step in range(1, n):
             nxt = old_order[(i + step) % n]
             if (target := survivor(nxt)) is not None:
-                if nxt not in old_looks and target not in looks:
+                if not own(nxt) and target not in looks:
                     looks[target] = old_looks[period]
                 break
-            if nxt in old_looks:
+            if own(nxt):
                 break  # another removed period with its own look takes over from here
 
 

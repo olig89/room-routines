@@ -89,3 +89,17 @@ def test_a_room_with_no_look_anywhere_says_so():
     d = empty.sensor(MOTION, True, at(28, 10))
     assert not d.actions and "has no look to switch on in any period" in d.reason
     assert Room(office(), default_schedule(), "Day", False, at(28, 10)).has_any_look()
+
+
+def test_a_picked_up_motion_room_waits_for_its_sensors_before_counting_down():
+    after = Room(office(triggers=(MOTION,), timeout=timedelta(seconds=30)), default_schedule(), "Day", True, at(28, 11))
+    after.unheard.add(MOTION)
+    d = after.restore(at(28, 10), False, at(28, 11))
+    assert after.deadline is None and "waiting for the sensors" in d.reason
+    d = after.sensor(MOTION, False, at(28, 11, 1))  # it reports: nobody there
+    assert after.deadline == at(28, 11, 1) + timedelta(seconds=30)
+
+
+def test_a_room_with_only_dark_day_looks_has_a_look():
+    room = Room(office(looks={}, dim_looks={"Day": Look({PLAY: DARK})}), default_schedule(), "Day", False, at(28, 10))
+    assert room.has_any_look()

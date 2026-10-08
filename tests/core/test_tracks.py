@@ -361,3 +361,14 @@ def test_the_floor_is_checked_and_stored():
     assert tracks_from({}).dark_below_wm2 == 150
     s = TrackSettings(on=True, dark_below_wm2=120)
     assert tracks_from({"tracks": tracks_to(s)}) == s
+
+
+def test_the_floor_doesnt_override_a_light_sensor_checked_first():
+    c = chooser(TrackSettings(on=True, sensor=WINDOW, first=SENSOR))
+    c.weather(95.0, at(30, 11, 55), 80.0)
+    c.reading(WINDOW, 9000, at(30, 11, 50))  # the sensor says a bright day
+    c.update(at(30, 12), HIGH, True, first=True)
+    assert c.track == NORMAL
+    c.reading(WINDOW, None, at(30, 12, 1))  # sensor gone: the weather leads, floor and all
+    c.update(at(30, 12, 2), HIGH, True, first=True)
+    assert c.track == DIM

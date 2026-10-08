@@ -23,7 +23,7 @@ Rules, in order:
 1. Dark Days only happen in the periods chosen for them (by default the ones
    that start between 06:00 and 15:00). Any other period is a Normal day.
 2. With the sun down (below ``MIN_ELEVATION``) it's a Dark Day.
-3. With the weather on and less than ``dark_below_wm2`` W/m² of sunlight
+3. With the weather on (checked first, or the reading in use) and less than ``dark_below_wm2`` W/m² of sunlight
    reaching the ground, it's a Dark Day whatever a clear day would give: a
    clear winter noon is still darker indoors than a grey summer day. It's
    Normal again only above ``NORMAL_AGAIN_RATIO`` times that (and only if rule 4
@@ -256,7 +256,10 @@ class TrackChooser:
             self.reason = "the sun is down"
             return DIM
         floor = self.settings.dark_below_wm2
-        sunlight = self.weather_reading(now).sunlight if floor > 0 else None
+        # The floor comes from the weather: it applies when the weather is checked
+        # first, or is the reading in use (the sensor first but unavailable).
+        weather_led = self.settings.first == WEATHER or self.current(now, sun).source != SENSOR
+        sunlight = self.weather_reading(now).sunlight if floor > 0 and weather_led else None
         if sunlight is not None and sunlight < floor:
             self.reason = f"{round(sunlight)} W/m² of sunlight, below {floor:g}"
             return DIM

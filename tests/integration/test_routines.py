@@ -244,3 +244,37 @@ async def test_a_light_reporting_late_after_a_restart_is_still_picked_up(hass, l
     hass.states.async_set(PLAY, "on", {"brightness": 102, "supported_features": LightEntityFeature.TRANSITION})
     await hass.async_block_till_done()
     assert room(hass).state.value == "owned", room(hass).last.reason
+
+
+async def test_a_knx_light_reporting_off_then_on_after_a_restart_is_picked_up(hass, lights, freezer):
+    entry = await setup(hass)
+    await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
+    await hass.async_block_till_done()
+    hass.states.async_set(PLAY, "on", {"brightness": 102, "supported_features": LightEntityFeature.TRANSITION})
+    await hass.async_block_till_done()
+    await at(hass, freezer, "2026-09-28 07:00:10+00:00")
+    hass.states.async_set(PLAY, "unavailable")
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    await live(hass)
+    hass.states.async_set(PLAY, "off")  # the entity loads before its bus read answers
+    await hass.async_block_till_done()
+    await at(hass, freezer, "2026-09-28 07:00:40+00:00")
+    hass.states.async_set(PLAY, "on", {"brightness": 102, "supported_features": LightEntityFeature.TRANSITION})
+    await hass.async_block_till_done()
+    assert room(hass).state.value == "owned", room(hass).last.reason
+
+
+async def test_a_restart_sends_the_look_once(hass, lights, freezer):
+    entry = await setup(hass)
+    await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
+    await hass.async_block_till_done()
+    hass.states.async_set(PLAY, "on", {"brightness": 102, "supported_features": LightEntityFeature.TRANSITION})
+    await hass.async_block_till_done()
+    await at(hass, freezer, "2026-09-28 07:00:10+00:00")
+    sent = len(lights.of("turn_on"))
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    await live(hass)
+    assert room(hass).state.value == "owned"
+    assert len(lights.of("turn_on")) - sent <= 1

@@ -274,3 +274,48 @@ def test_two_removed_periods_in_a_row_hand_on_the_later_look():
     rows = [{"name": "Day", "start": "09:00"}, {"name": "Evening", "start": "17:00"}, {"name": "Overnight", "start": "23:00"}]
     options = set_periods(options, rows, [], {"Early morning": None, "Morning": None})
     assert options["rooms"][room_id]["looks"] == {"Day": later}
+
+
+def test_removing_a_period_never_changes_what_the_other_periods_show():
+    """Every mix of Normal and Dark Day looks over the five default periods, each
+    period removed in turn: every period left shows exactly what it did before."""
+    from itertools import product
+
+    from custom_components.room_routines.core.looks import resolve
+    from custom_components.room_routines.core.serial import room_from, schedule_from
+
+    rows = schedule_to(default_schedule())["periods"]
+    names = [r["name"] for r in rows]
+    for choice in product(range(4), repeat=len(names)):
+        looks = {n: {"lights": {"light.ceiling": {"on": True, "brightness_pct": 10 + i}}}
+                 for i, (n, c) in enumerate(zip(names, choice)) if c & 1}
+        dim = {n: {"lights": {"light.ceiling": {"on": True, "brightness_pct": 60 + i}}}
+               for i, (n, c) in enumerate(zip(names, choice)) if c & 2}
+        if not looks:
+            continue
+        room = {**ROOM, "looks": looks, "dim_looks": dim}
+        options = {**base(), "rooms": {"r": room}}
+        old = room_from(room)
+        old_schedule = schedule_from(options)
+        for gone in names:
+            kept = [r for r in rows if r["name"] != gone]
+            new_options = set_periods(options, kept, [], {gone: None})
+            new = room_from(new_options["rooms"]["r"])
+            new_schedule = schedule_from(new_options)
+            for r in kept:
+                for track in ("normal", "dim"):
+                    before = resolve(r["name"], track, old.looks, old.dim_looks, old_schedule).look
+                    after = resolve(r["name"], track, new.looks, new.dim_looks, new_schedule).look
+                    assert before == after, (choice, gone, r["name"], track)
+
+
+def test_a_dark_day_look_only_carries_where_it_was_used():
+    # The auditor's case: Morning has its own Normal look, so on Dark Days it never
+    # used Early morning's Dark Day look and mustn't get it.
+    options, room_id = add_room(base(), ROOM)
+    early = {"lights": {"light.ceiling": {"on": True, "brightness_pct": 10}}}
+    morning = {"lights": {"light.ceiling": {"on": True, "brightness_pct": 70}}}
+    options["rooms"][room_id]["looks"] = {"Early morning": early, "Morning": morning}
+    options["rooms"][room_id]["dim_looks"] = {"Early morning": {"lights": {"light.ceiling": {"on": True, "brightness_pct": 5}}}}
+    options = set_periods(options, ROWS_WITHOUT_EARLY, [], {"Early morning": None})
+    assert options["rooms"][room_id]["dim_looks"] == {}
