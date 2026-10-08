@@ -7,7 +7,7 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.7.0";
+const PANEL_VERSION = "0.7.1";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
@@ -479,6 +479,11 @@ class RoomRoutinesPanel extends HTMLElement {
     return `<div class="meta"><ha-icon class="small" icon="mdi:clock-outline"></ha-icon> ${differs ? `In <b>${esc(room.period)}</b> (the house is in ${esc(d.house.period)}); ` : ""}${bits.join("; ")}.</div>`;
   }
 
+  _noLookWarning(room) {
+    if (!room.no_look || room.mode === "off") return "";
+    return `<div class="warntext"><ha-icon icon="mdi:alert-outline"></ha-icon> No period has a look to switch on, so this room never lights up. Set one in its looks table.</div>`;
+  }
+
   _modePill(room) {
     if (!this._admin) return `<span class="pill mode-${esc(room.mode)}">${esc(MODE_LABEL[room.mode] || room.mode)}</span>`;
     return `<select class="pill mode-${esc(room.mode)}" data-action="mode" data-room="${esc(room.id)}" title="${esc(MODE_HELP[room.mode] || "")}" aria-label="Mode for ${esc(room.name)}">
@@ -495,6 +500,7 @@ class RoomRoutinesPanel extends HTMLElement {
         <div data-stop>${this._modePill(room)}</div>
       </div>
       <div class="status">${this._statusLine(room)}</div>
+      ${this._noLookWarning(room)}
       ${room.reason ? `<div class="meta reason">${esc(room.reason)}</div>` : ""}
       ${this._luxLine(room) ? `<div class="meta">${this._luxLine(room)}</div>` : ""}
       ${this._ownTimesLine(d, room)}
@@ -560,6 +566,7 @@ class RoomRoutinesPanel extends HTMLElement {
           <div>${this._modePill(room)}</div>
         </div>
         <div class="status">${this._statusLine(room)}</div>
+        ${this._noLookWarning(room)}
         ${room.reason ? `<div class="meta reason">${esc(room.reason)}</div>` : ""}
         ${this._luxLine(room) ? `<div class="meta">${this._luxLine(room)}</div>` : ""}
         ${this._ownTimesLine(d, room)}

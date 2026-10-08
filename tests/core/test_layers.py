@@ -81,3 +81,11 @@ def test_a_motion_room_picked_up_counts_down_when_empty():
     d = after.restore(at(28, 10), False, at(28, 11))
     assert after.deadline == at(28, 11) + timedelta(seconds=30)
     assert "lights off in 30 s" in d.reason
+
+
+def test_a_room_with_no_look_anywhere_says_so():
+    empty = Room(office(triggers=(MOTION,), looks={}), default_schedule(), "Day", False, at(28, 10))
+    assert not empty.has_any_look()
+    d = empty.sensor(MOTION, True, at(28, 10))
+    assert not d.actions and "has no look to switch on in any period" in d.reason
+    assert Room(office(), default_schedule(), "Day", False, at(28, 10)).has_any_look()

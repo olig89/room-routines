@@ -148,6 +148,8 @@ def room_snapshot(hass: HomeAssistant, runner: RoomRunner) -> dict[str, Any]:
         "own_times": bool(runner.config.period_starts),
         "has_sensors": runner.config.has_sensors,
         "paused": room.paused if room else False,
+        # Nothing to switch on in any period: the room can never light up.
+        "no_look": (not room.has_any_look()) if room else False,
         **runner.context_status(),
         "blending": (
             {"fraction": round(blending[0], 3), "into": blending[1]} if blending else None

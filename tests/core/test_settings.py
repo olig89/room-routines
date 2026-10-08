@@ -240,3 +240,37 @@ def test_house_rules_name_real_rooms_and_follow_removals_and_renames():
     removed = remove_room(options, a)
     # the rule was only for the removed room: gone, not widened to every room
     assert removed["house_rules"] == [{"when": {"entity": "zone.home", "state": "0"}, "action": "nothing"}]
+
+
+ROWS_WITHOUT_EARLY = [
+    {"name": "Morning", "start": "06:30"}, {"name": "Day", "start": "09:00"},
+    {"name": "Late Afternoon", "start": "17:00"}, {"name": "Evening", "start": "20:00"},
+    {"name": "Overnight", "start": "23:00"},
+]
+
+
+def test_removing_the_period_holding_a_rooms_only_look_keeps_the_look():
+    # A new room's one look sits under the earliest period (Early morning) and
+    # every other period uses it. Removing Early morning used to delete it.
+    options, room_id = add_room(base(), ROOM)
+    only = options["rooms"][room_id]["looks"]["Early morning"]
+    options = set_periods(options, ROWS_WITHOUT_EARLY, [], {"Early morning": None})
+    assert options["rooms"][room_id]["looks"] == {"Morning": only}
+
+
+def test_a_removed_periods_look_goes_only_where_it_was_used():
+    options, room_id = add_room(base(), ROOM)
+    own = {"lights": {"light.ceiling": {"on": True, "brightness_pct": 40}}}
+    options = set_look(options, room_id, "Morning", own)
+    # Morning has its own look, so nothing was using Early morning's: it goes.
+    options = set_periods(options, ROWS_WITHOUT_EARLY, [], {"Early morning": None})
+    assert options["rooms"][room_id]["looks"] == {"Morning": own}
+
+
+def test_two_removed_periods_in_a_row_hand_on_the_later_look():
+    options, room_id = add_room(base(), ROOM)
+    later = {"lights": {"light.ceiling": {"on": True, "brightness_pct": 70}}}
+    options = set_look(options, room_id, "Morning", later)
+    rows = [{"name": "Day", "start": "09:00"}, {"name": "Evening", "start": "17:00"}, {"name": "Overnight", "start": "23:00"}]
+    options = set_periods(options, rows, [], {"Early morning": None, "Morning": None})
+    assert options["rooms"][room_id]["looks"] == {"Day": later}

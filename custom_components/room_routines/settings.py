@@ -213,9 +213,11 @@ def set_periods(
     """The whole period list at once.
 
     ``renames`` maps an old period name to its new name (or ``None`` if it was
-    removed), so every room's looks follow their period. Looks for periods that
-    no longer exist are dropped; a room then borrows the previous period's look.
+    removed), so every room's looks follow their period. A removed period's look
+    passes to the period after it when that one had none of its own (it was
+    using the removed period's look, so it keeps it); otherwise it's dropped.
     """
+    old_order = schedule_from(options).order()
     out = _options(options)
     clean_rows = [
         {"name": str(r.get("name", "")).strip(), "start": _hhmm(r.get("start")), "alt_start": _hhmm(r.get("alt_start"))}
@@ -237,11 +239,13 @@ def set_periods(
             if key not in room:
                 continue
             looks: dict[str, Any] = {}
+            old_looks = room.get(key) or {}
             # Built fresh rather than edited in place, so two periods can swap names.
-            for period, look in (room.get(key) or {}).items():
+            for period, look in old_looks.items():
                 target = renames.get(period, period)
                 if target and target in names:
                     looks[target] = look
+            _carry_removed(old_order, old_looks, looks, renames, names)
             room[key] = looks
         # A room's own times and blends follow the period too.
         for key in ("blends", "period_starts"):
@@ -277,6 +281,37 @@ def set_periods(
     out[CONF_PERIODS] = clean_rows
     out[CONF_ALT_DAYS] = days
     return out
+
+
+def _carry_removed(
+    old_order: tuple[str, ...],
+    old_looks: Mapping[str, Any],
+    looks: dict[str, Any],
+    renames: Mapping[str, str | None],
+    names: set[str],
+) -> None:
+    """Give each removed period's look to the next surviving period that used it.
+
+    A period without a look of its own uses the one before it, so the periods
+    after a removed one were showing its look; the first of them keeps it.
+    """
+    n = len(old_order)
+
+    def survivor(p: str) -> str | None:
+        target = renames.get(p, p)
+        return target if target and target in names else None
+
+    for i, period in enumerate(old_order):
+        if survivor(period) is not None or period not in old_looks:
+            continue
+        for step in range(1, n):
+            nxt = old_order[(i + step) % n]
+            if (target := survivor(nxt)) is not None:
+                if nxt not in old_looks and target not in looks:
+                    looks[target] = old_looks[period]
+                break
+            if nxt in old_looks:
+                break  # another removed period with its own look takes over from here
 
 
 # ---- looks ---------------------------------------------------------------------

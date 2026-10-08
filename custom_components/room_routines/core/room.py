@@ -92,6 +92,7 @@ LEAVE = "leave"
 ROUTINE = "routine"
 ADOPT_WAIT = timedelta(seconds=3)  # let a hand switch-on settle before taking over
 BLEND_STEP = timedelta(minutes=2)  # how often a blending room is moved on
+NO_LOOK = "the room has no look to switch on in any period: set one in its looks table"
 
 SceneReader = Callable[[str], Mapping[str, LightTarget] | None]
 
@@ -429,6 +430,13 @@ class Room:
         self.adopt_at = None
         self._last_blend = None
 
+    def has_any_look(self) -> bool:
+        """Whether any period gives the lights something to do (on a Normal day)."""
+        return any(
+            not resolve(p, NORMAL, self.config.looks, self.config.dim_looks, self.schedule).look.nothing
+            for p in self.schedule.order()
+        )
+
     # -- layers --
 
     def layer(self) -> Layer | None:
@@ -490,6 +498,8 @@ class Room:
                 f"{self.config.threshold_lux:g})"
             )
         if self._look().nothing:
+            if not self.has_any_look():
+                return self._decide(f"motion at {entity}, but {NO_LOOK}")
             return self._decide(f"motion at {entity}: {self._look_name()} is 'do nothing'")
         look, factor, name = self._target(now)
         self._own(now)
@@ -506,6 +516,8 @@ class Room:
         if refused:
             return self._decide(f"{why}, but {refused}")
         if self._look().nothing:
+            if not self.has_any_look():
+                return self._decide(f"{why}, but {NO_LOOK}")
             return self._decide(f"{why}: {self._look_name()} is 'do nothing'")
         look, factor, name = self._target(now)
         self._own(now)
