@@ -71,6 +71,20 @@ room can run in log-only mode first.
     every light at or below a brightness. A lit room moves to the new look when a
     rule starts or ends. **House rules** do the same for chosen rooms, or every
     room (away from home, the baby asleep); a room's own rules come first.
+- **Someone's there over a routine** (optional, for rooms with sensors): a
+  second looks table, *Someone's there*. While the room's routine runs (a timer,
+  a starter, a button, lights switched on by hand), motion moves the lights set
+  there to those looks, the others stay with the routine, and when the room is
+  empty they fade back to the routine instead of going off: a hallway that sits
+  very dim all evening and brightens as someone walks through. Without such
+  looks a motion room works as it always has.
+- **Signals** (optional, per room): some of the room's lights show something
+  while an entity is in a state: in a call, the desk lamp purple; muted, green.
+  Colour and brightness per light, optionally one of the light's own effects and
+  a flash when it starts. While a signal holds a light nothing else in the room
+  touches it (a scene look is sent without it), it shows even with the room off,
+  and when it ends the light goes back to what the room is doing, or to how it
+  was before. The first signal in the list wins a light two signals want.
 - **Fade-out:** lights with a native transition fade by themselves; others (KNX)
   get small brightness steps, and come back at their old level next time.
 - **Per room:** a *Status* sensor (idle / lights on by motion / switched on by

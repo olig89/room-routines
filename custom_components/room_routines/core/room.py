@@ -70,6 +70,11 @@ Someone's there uses its own looks when the room has any, otherwise the room's
 looks. A light changed by hand is held by *Hand* until the lights are switched
 off. ``layer()`` says which one is on top now.
 
+Signals (see ``signals``) sit above all of that: while one holds a light, the
+room leaves that light alone (a scene look is read and sent without it), and
+when the signal ends the light goes back to what the room is doing, or to how
+it was before the signal took it.
+
 After a restart the room can't see who switched its lights on. The integration
 keeps ``memory()`` (was the routine running, was a hand change holding it) and
 hands it back with ``restore``, so a routine that was running carries on.
@@ -83,7 +88,7 @@ wiring.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta
 from enum import Enum
 
@@ -93,6 +98,7 @@ from .looks import LightTarget, Look, LookSource, resolve, scaled
 from .lux import AmbientTracker, dark_enough
 from .periods import Schedule
 from .rules import CAP, LOOK, NOTHING, Condition, Rule
+from .signals import Signal, held_by, targets_to
 from .timers import Timer
 from .tracks import DIM, NORMAL, TRACK_LABELS
 
@@ -146,6 +152,8 @@ class RoomConfig:
     only_when: tuple[Condition, ...] = ()
     # The room's own "while X" rules (the house's come with the context).
     rules: tuple[Rule, ...] = ()
+    # Signals: some lights show something while it's true (first in the list wins).
+    signals: tuple[Signal, ...] = ()
 
     def __post_init__(self) -> None:
         overlap = set(self.triggers) & set(self.holds)
@@ -157,6 +165,10 @@ class RoomConfig:
             raise ValueError(f"unknown on_by_hand {self.on_by_hand!r}")
         if any(m < 0 for m in self.blends.values()):
             raise ValueError("blend minutes can't be negative")
+        for signal in self.signals:
+            stray = set(signal.lights) - set(self.lights)
+            if stray:
+                raise ValueError(f"a signal can only use the room's lights, not {sorted(stray)}")
 
     @property
     def has_sensors(self) -> bool:
@@ -194,6 +206,10 @@ class ApplyLook:
     # Auto-dim still to apply: only for a scene look, whose settings the
     # integration has to read first (a lights look arrives already scaled).
     factor: float = 1.0
+    # A signal's own command (never held back for a signal): flash once, a light effect.
+    signal: bool = False
+    flash: bool = False
+    effect: str | None = None
 
 
 @dataclass(frozen=True)
@@ -274,6 +290,9 @@ class Room:
         # Sensors with no real state yet (just after a restart): a picked-up room
         # doesn't count down on them until they report.
         self.unheard: set[str] = set()
+        # Lights a signal holds now, and how each was before the signal took it.
+        self.held: dict[str, Signal] = {}
+        self.before: dict[str, LightTarget] = {}
         self.unheard_until: datetime | None = None
         self.deadline: datetime | None = None
         self.cooldown_until: datetime | None = None
@@ -480,8 +499,95 @@ class Room:
         return Decision((), self.last.reason)
 
     def _decide(self, reason: str, *actions: Action) -> Decision:
-        self.last = Decision(tuple(actions), reason)
+        shielded: list[Action] = []
+        for action in actions:
+            shielded.extend(self._shield(action))
+        self.last = Decision(tuple(shielded), reason)
         return self.last
+
+    def _shield(self, action: Action) -> list[Action]:
+        """Keep the room's own commands off the lights a signal holds."""
+        if not self.held or not isinstance(action, (ApplyLook, TurnOff)):
+            return [action]
+        if isinstance(action, TurnOff):
+            lights = tuple(light for light in action.lights if light not in self.held)
+            return [TurnOff(lights, action.transition)] if lights else []
+        if action.signal:
+            return [action]
+        look = action.look
+        if look.scene:
+            lights = self.scene_reader(look.scene) if self.scene_reader else None
+            if lights is None:
+                # A scene that can't be read (another app's): turn it on, then put
+                # the signals back on the lights it may have changed.
+                return [action, *self._signal_actions(list(self.held), flash=False)]
+            look = scaled(Look(dict(lights)), action.factor)
+            action = replace(action, factor=1.0)
+        kept = {light: t for light, t in look.lights.items() if light not in self.held}
+        if not kept:
+            return []
+        return [replace(action, look=Look(kept, look.blinds))]
+
+    def _signal_actions(self, lights: list[str], flash: bool = True) -> list[Action]:
+        """Each signal's look on the given lights it holds, one command per signal."""
+        groups: dict[int, tuple[Signal, list[str]]] = {}
+        for light in lights:
+            signal = self.held[light]
+            groups.setdefault(id(signal), (signal, []))[1].append(light)
+        return [
+            ApplyLook(Look({l: signal.lights[l] for l in ls}), signal=True,
+                      flash=flash and signal.flash, effect=signal.effect)
+            for signal, ls in groups.values()
+        ]
+
+    def set_signals(
+        self, states: Mapping[str, str | None], current: Mapping[str, LightTarget], now: datetime
+    ) -> Decision:
+        """The entities signals read changed: take, change or give back lights.
+        ``current`` is how the lights are now (what to go back to later)."""
+        new = held_by(self.config.signals, states, self.config.lights)
+        if new == self.held:
+            return self._unchanged()
+        old = self.held
+        changed = [light for light in new if old.get(light) != new[light]]
+        released = [light for light in old if light not in new]
+        for light in changed:
+            if light not in old and light not in self.before:
+                self.before[light] = current.get(light, LightTarget(False))
+        back = self._fallback(released, now)
+        self.held = new
+        for light in released:
+            self.before.pop(light, None)
+        actions = self._signal_actions(changed)
+        if back:
+            actions.append(ApplyLook(Look(back), signal=True))
+        parts = []
+        started = {new[light].name for light in changed}
+        if started:
+            parts.append("signal: " + ", ".join(sorted(started)))
+        ended = {old[light].name for light in released}
+        if ended:
+            parts.append("signal over: " + ", ".join(sorted(ended)))
+        return self._decide("; ".join(parts), *actions)
+
+    def _fallback(self, lights: list[str], now: datetime) -> dict[str, LightTarget]:
+        """Where released lights go: what the room is doing with them, else how
+        they were before the signal took them (off if that isn't known)."""
+        if not lights:
+            return {}
+        room: Mapping[str, LightTarget] = {}
+        if self.state is State.OWNED and not self.paused:
+            look, factor, _ = self._target(now)
+            plain = None if look.nothing else self._plain(look, factor)
+            room = plain.lights if plain is not None else {}
+        return {light: room.get(light) or self.before.get(light, LightTarget(False)) for light in lights}
+
+    def signal_status(self) -> list[dict]:
+        """For the page: each signal holding lights now."""
+        out: dict[str, list[str]] = {}
+        for light, signal in self.held.items():
+            out.setdefault(signal.name, []).append(light)
+        return [{"name": name, "lights": lights} for name, lights in out.items()]
 
     def _check_timer(self, now: datetime) -> Decision | None:
         """Start or cancel the switch-off countdown for an owned room."""
@@ -546,15 +652,20 @@ class Room:
         return self.config.base_layer
 
     def memory(self) -> dict | None:
-        """What to remember across a restart: only a running routine."""
-        if self.state is not State.OWNED:
-            return None
-        return {
-            "owned_at": (self.owned_at.isoformat() if self.owned_at else None),
-            "paused": self.paused,
-            "ambient": self.ambient_on,
-            "someone": self.someone_on,
-        }
+        """What to remember across a restart: a running routine, and how the lights
+        a signal holds were before it."""
+        out: dict = {}
+        if self.state is State.OWNED:
+            out = {
+                "owned_at": (self.owned_at.isoformat() if self.owned_at else None),
+                "paused": self.paused,
+                "ambient": self.ambient_on,
+                "someone": self.someone_on,
+            }
+        if self.before:
+            # How signal-held lights were before, so a restart can still give them back.
+            out["signal_before"] = targets_to(self.before)
+        return out or None
 
     def restore(
         self,

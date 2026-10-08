@@ -60,6 +60,7 @@ from homeassistant.util import dt as dt_util
 from .const import ANY_SIGNAL, DOMAIN, MODE_LIVE, MODE_LOG_ONLY, MODE_OFF, house_signal, room_signal
 from .core.fade import plan_fade
 from .core.layers import LAYER_IDS
+from .core.signals import held_by, targets_from
 from .core.habits import Change, Suggestion, change_from, change_to, suggest
 from .core.looks import OFF, LightTarget, Look, resolve, scaled
 from .core.matching import Command, OwnChangeMatcher
@@ -228,7 +229,9 @@ class RoomRunner:
                     self.hass, RESTORE_GRACE.total_seconds() + 1, self._grace_over
                 )
         self._room_mode = self.mode
-        lights_on = self.mode == MODE_LIVE and self._any_on()
+        # Lights a signal holds don't make the room "on" (a call light at start-up).
+        signalled = set(held_by(self.config.signals, self._states(), self.config.lights))
+        lights_on = self.mode == MODE_LIVE and self._any_on(signalled)
         self.room = Room(
             self.config, self.schedule, self.period_now(now), lights_on, now,
             stealth=self.house.stealth, track=self.house.track, auto_dim=self.house.tracks.factor,
@@ -242,6 +245,12 @@ class RoomRunner:
         rule, rule_text, unmet_text = self._context(self._states())
         self.room.rule, self.room.rule_text, self.room.unmet_text = rule, rule_text, unmet_text
         self._offer_lux(self.hass.states.get(self.lux_sensor) if self.lux_sensor else None, now)
+        if self._restore and self._restore.get("signal_before"):
+            self.room.before.update(targets_from(self._restore["signal_before"]))
+        elif (kept := self.house.room_memory.get(self.room_id)) and kept.get("signal_before"):
+            self.room.before.update(targets_from(kept["signal_before"]))
+        if self.mode != MODE_OFF and self.config.signals:
+            self._run(self.room.set_signals(self._states(), capture(self.hass, self.config).lights, now))
         self._try_restore(now)
         self._persist()
         self._notify()
@@ -261,6 +270,9 @@ class RoomRunner:
             return
         if self._restore_until is not None and now > self._restore_until:
             self._restore = None
+            return
+        if "owned_at" not in self._restore:
+            self._restore = None  # only signals' "before" was remembered: nothing to pick up
             return
         if self.room.state is not State.MANUAL:
             return  # lights not back yet (or off): keep waiting until the grace ends
@@ -308,8 +320,12 @@ class RoomRunner:
 
     # -- events from Home Assistant --
 
-    def _any_on(self) -> bool:
+    def _any_on(self, skip: set[str] | None = None) -> bool:
+        if skip is None:
+            skip = set(self.room.held) if self.room is not None else set()
         for light in self.config.switchable():
+            if light in skip:
+                continue
             state = self.hass.states.get(light)
             if state is not None and state.state == STATE_ON:
                 return True
@@ -332,6 +348,8 @@ class RoomRunner:
         new = event.data["new_state"]
         if entity not in self.config.switchable() or new is None:
             return
+        if entity in self.room.held:
+            return  # a signal holds it: a change to it is the signal's (or shows over it)
         if new.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return
         now = dt_util.now()
@@ -370,6 +388,7 @@ class RoomRunner:
         found = [c.entity for c in self.config.starters]
         found += [c.entity for c in self.config.only_when]
         found += [r.when.entity for r in self.rules]
+        found += [s.when.entity for s in self.config.signals]
         return sorted(set(found))
 
     def _states(self, override: Mapping[str, str | None] | None = None) -> dict[str, str | None]:
@@ -405,6 +424,8 @@ class RoomRunner:
         now = dt_util.now()
         rule, rule_text, unmet_text = self._context(self._states())
         self._run(self.room.set_context(rule, rule_text, unmet_text, now))
+        if self.config.signals:
+            self._run(self.room.set_signals(self._states(), capture(self.hass, self.config).lights, now))
         # A starter fires when it becomes true, not while it stays true.
         before = {entity: old.state if old is not None else None}
         after = {entity: new.state if new is not None else None}
@@ -611,7 +632,14 @@ class RoomRunner:
             data[ATTR_ENTITY_ID] = self.status_entity_id
         await self.hass.services.async_call("logbook", "log", data)
 
-    async def _send(self, light: str, target: LightTarget, transition: timedelta | None = None) -> None:
+    async def _send(
+        self,
+        light: str,
+        target: LightTarget,
+        transition: timedelta | None = None,
+        flash: bool = False,
+        effect: str | None = None,
+    ) -> None:
         ctx = Context()
         pct = target.brightness_pct if target.on else None
         self.matcher.record(Command(light, ctx.id, dt_util.now(), target.on, pct))
@@ -627,6 +655,10 @@ class RoomRunner:
             data["color_temp_kelvin"] = target.color_temp_kelvin
         if target.rgb is not None:
             data["rgb_color"] = list(target.rgb)
+        if flash:
+            data["flash"] = "short"
+        if effect and effect in (self.hass.states.get(light).attributes.get("effect_list") or []):
+            data["effect"] = effect
         await self.hass.services.async_call("light", "turn_on", data, context=ctx)
 
     def _supports_transition(self, light: str) -> bool:
@@ -665,7 +697,10 @@ class RoomRunner:
             if how == "steps":
                 fading[light] = target
                 continue
-            await self._send(light, target, action.transition if how == "transition" else None)
+            await self._send(
+                light, target, action.transition if how == "transition" else None,
+                flash=action.flash, effect=action.effect,
+            )
         if fading:
             self._fade(fading, action.transition)
 

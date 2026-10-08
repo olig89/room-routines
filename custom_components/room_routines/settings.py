@@ -13,6 +13,7 @@ from typing import Any
 
 from .const import CONF_ALT_DAYS, CONF_HIDDEN_AREAS, CONF_HOUSE_RULES, CONF_PERIODS, CONF_ROOMS, CONF_TRACKS, clean_options
 from .core.rules import condition_from, condition_to, rule_from, rule_to
+from .core.signals import signal_from, signal_to
 from .core.serial import first_look, look_from, look_to, room_from, schedule_from, tracks_from, tracks_to
 from .core.tracks import DIM, NORMAL, TRACKS
 
@@ -83,6 +84,17 @@ def clean_room(user_input: Mapping[str, Any], previous: Mapping[str, Any] | None
         ]
     except (ValueError, KeyError, TypeError) as err:
         raise SettingsError("invalid_rules") from err
+    # Signals: only the room's own lights; one left with no lights goes.
+    signals = []
+    try:
+        for data in user_input.get("signals", room.get("signals")) or []:
+            data = dict(data)
+            data["lights"] = {l: t for l, t in (data.get("lights") or {}).items() if l in room["lights"]}
+            if data["lights"]:
+                signals.append(signal_to(signal_from(data)))
+    except (ValueError, KeyError, TypeError) as err:
+        raise SettingsError("invalid_signals") from err
+    room["signals"] = signals
     if not room["name"]:
         raise SettingsError("no_name")
     # A room needs lights; sensors are optional (a room can run on timers, buttons

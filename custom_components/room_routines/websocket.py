@@ -148,6 +148,7 @@ def room_snapshot(hass: HomeAssistant, runner: RoomRunner) -> dict[str, Any]:
         "own_times": bool(runner.config.period_starts),
         "has_sensors": runner.config.has_sensors,
         "paused": room.paused if room else False,
+        "signals_now": room.signal_status() if room else [],
         # Nothing to switch on in any period: the room can never light up.
         "no_look": (not room.has_any_look()) if room else False,
         **runner.context_status(),
@@ -173,6 +174,7 @@ def room_snapshot(hass: HomeAssistant, runner: RoomRunner) -> dict[str, Any]:
             "starters": list(stored.get("starters") or []),
             "only_when": list(stored.get("only_when") or []),
             "rules": list(stored.get("rules") or []),
+            "signals": list(stored.get("signals") or []),
         },
         "looks": dict(stored.get("looks") or {}),
         "dim_looks": dict(stored.get("dim_looks") or {}),
@@ -405,6 +407,7 @@ ROOM_FIELDS = vol.Schema(
         vol.Optional("starters"): [dict],
         vol.Optional("only_when"): [dict],
         vol.Optional("rules"): [dict],
+        vol.Optional("signals"): [dict],
     }
 )
 

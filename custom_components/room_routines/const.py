@@ -8,7 +8,7 @@ from typing import Any
 
 DOMAIN = "room_routines"
 NAME = "Room Routines"
-VERSION = "0.8.0"  # must match manifest.json and the panel (a test checks)
+VERSION = "0.9.0"  # must match manifest.json and the panel (a test checks)
 
 MODE_OFF = "off"
 MODE_LOG_ONLY = "log_only"

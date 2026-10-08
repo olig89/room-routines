@@ -7,7 +7,7 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.8.0";
+const PANEL_VERSION = "0.9.0";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
@@ -32,6 +32,7 @@ const RULE_ACTIONS = { nothing: "Do nothing", look: "Use another look", cap: "No
 const ERRORS = {
   no_name: "Give the room a name.",
   invalid_room: "A room needs at least one light, a sensor can't both switch the lights on and only keep them on, and every timer needs a time.",
+  invalid_signals: "Every signal needs an entity and a state, and at least one of the room's lights.",
   invalid_rules: "Every condition and rule needs an entity and a state; a rule using another look needs a scene or a period, and a brightness limit a level from 1 to 100 %.",
   invalid_room_times: "The room's own start times must give every period a different time.",
   invalid_periods: "Every period needs its own name and a start time no other period uses on the same days.",
@@ -426,6 +427,7 @@ class RoomRoutinesPanel extends HTMLElement {
     else if (room.state === "owned" && !room.has_sensors) label = "Following its routine";
     const bits = [`<b>${esc(label)}</b>`];
     if (room.rule) bits.push(`<span class="warntext">${esc(room.rule)}</span>`);
+    for (const sig of room.signals_now || []) bits.push(`<span class="signal">signal: ${esc(sig.name)} on ${sig.lights.map((l) => esc(this._name(l))).join(", ")}</span>`);
     if (room.unmet) bits.push(`waiting: only when ${esc(room.unmet)}`);
     if (room.blending) bits.push(`blending into ${esc(room.blending.into)} (${Math.round(room.blending.fraction * 100)} %)`);
     if (room.mode === "log_only") bits.push(`<span class="muted">(log only: switching nothing)</span>`);
@@ -929,7 +931,7 @@ class RoomRoutinesPanel extends HTMLElement {
     if (room) {
       this._roomDraft = { id: room.id, name: room.name, area_id: room.area_id, mode: room.mode, ...JSON.parse(JSON.stringify(room.settings)) };
     } else {
-      this._roomDraft = { id: null, name: "", area_id: null, lights: [], triggers: [], holds: [], lux_sensor: null, self_fading: [], on_by_hand: "leave", blends: {}, period_starts: {}, timers: [], starters: [], only_when: [], rules: [], ...ROOM_DEFAULTS };
+      this._roomDraft = { id: null, name: "", area_id: null, lights: [], triggers: [], holds: [], lux_sensor: null, self_fading: [], on_by_hand: "leave", blends: {}, period_starts: {}, timers: [], starters: [], only_when: [], rules: [], signals: [], ...ROOM_DEFAULTS };
     }
     const r = this._roomDraft;
     r.on_by_hand = r.on_by_hand || "leave";
@@ -939,6 +941,7 @@ class RoomRoutinesPanel extends HTMLElement {
     r.starters = (r.starters || []).map((c) => ({ ...c }));
     r.only_when = (r.only_when || []).map((c) => ({ ...c }));
     r.rules = (r.rules || []).map((x) => ({ ...x, when: { ...(x.when || {}) } }));
+    r.signals = (r.signals || []).map((x) => ({ ...x, when: { ...(x.when || {}) }, lights: JSON.parse(JSON.stringify(x.lights || {})) }));
     r.search = {};
     this._roomError = null;
     this._entityList = null;
@@ -985,6 +988,7 @@ class RoomRoutinesPanel extends HTMLElement {
         </div></fieldset>` : ""}
         ${this._routineFields(r)}
         ${this._rulesFields(r)}
+        ${this._signalsFields(r)}
         ${r.id ? `<label>Mode <select data-room-field="mode">${Object.entries(MODE_LABEL).map(([k, v]) => `<option value="${k}" ${k === r.mode ? "selected" : ""}>${v}</option>`).join("")}</select>
           <span class="help">${esc(MODE_HELP[r.mode] || "")}</span></label>` : `<p class="help">A new room starts in Log only, with every light on at its last brightness in every period.</p>`}
         <div class="row">
@@ -1130,6 +1134,47 @@ class RoomRoutinesPanel extends HTMLElement {
       <div class="row"><button class="btn small" data-action="rule-add" data-root="room">Add a rule</button></div>
       <span class="help">Do nothing: the room doesn't start at all (a lit room still goes dark as usual). Another look: a scene, or another period's look. No brighter than: every light kept at or below a level. The first rule that holds wins, this room's before the house's. When a rule starts or ends, a lit room moves to its new look.</span>
     </fieldset>`;
+  }
+
+  _signalsFields(r) {
+    const hex = (rgb) => (rgb ? "#" + rgb.map((c) => Math.max(0, Math.min(255, c | 0)).toString(16).padStart(2, "0")).join("") : "#ffffff");
+    const rows = r.signals.map((sig, i) => {
+      const lights = r.lights.map((l) => {
+        const t = sig.lights[l];
+        const on = !!t;
+        return `<div class="siglight">
+          <label class="inline"><input type="checkbox" data-sig="${i}" data-sig-light="${esc(l)}" data-sig-field="include" ${on ? "checked" : ""}> ${esc(this._name(l))}</label>
+          ${on ? `<input type="color" value="${esc(hex(t.rgb))}" data-sig="${i}" data-sig-light="${esc(l)}" data-sig-field="rgb" aria-label="Colour for ${esc(this._name(l))}">
+          <span class="inputunit"><input type="number" min="1" max="100" step="1" value="${esc(t.brightness_pct ?? 100)}" data-sig="${i}" data-sig-light="${esc(l)}" data-sig-field="brightness_pct" aria-label="Brightness for ${esc(this._name(l))}"> %</span>` : ""}
+        </div>`;
+      }).join("");
+      return `<div class="cond signal-row">
+        <input class="name" placeholder="Name, e.g. In a call" value="${esc(sig.name || "")}" data-root="room" data-edit="signals.${i}.name" aria-label="Signal name">
+        <div>While ${this._condFields("room", `signals.${i}.when`, sig.when)}</div>
+        <div class="siglights">${lights || `<span class="meta">Add lights to the room first.</span>`}</div>
+        <div><label class="inline"><input type="checkbox" data-sig="${i}" data-sig-field="flash" ${sig.flash ? "checked" : ""}> Flash once when it starts</label>
+          <input class="effect" placeholder="Light effect (optional)" value="${esc(sig.effect || "")}" data-root="room" data-edit="signals.${i}.effect" aria-label="Light effect"></div>
+        <button class="btn tiny danger" data-action="signal-remove" data-row="${i}">Remove</button>
+      </div>`;
+    }).join("");
+    return `<fieldset><legend>Signals</legend>
+      ${this._entityOptions()}
+      ${rows || `<div class="meta">None.</div>`}
+      <div class="row"><button class="btn small" data-action="signal-add">Add a signal</button></div>
+      <span class="help">Some of the room's lights show something while it's true: in a call, the desk lamp purple; muted, green. While a signal holds a light, nothing else in the room touches it. It shows even when the room is off, and when it ends the light goes back to what the room is doing, or to how it was before. The first signal in the list wins a light two signals want. A light effect only works if the light offers one by that name.</span>
+    </fieldset>`;
+  }
+
+  _cleanSignals(signals) {
+    return signals
+      .filter((x) => x.when?.entity && Object.keys(x.lights || {}).length)
+      .map((x) => {
+        const out = { name: (x.name || "").trim() || "Signal", when: { entity: x.when.entity.trim(), state: (x.when.state || "on").trim() }, lights: x.lights };
+        if (x.when.negate) out.when.negate = true;
+        if (x.flash) out.flash = true;
+        if ((x.effect || "").trim()) out.effect = x.effect.trim();
+        return out;
+      });
   }
 
   _houseRulesForm() {
@@ -1420,6 +1465,25 @@ class RoomRoutinesPanel extends HTMLElement {
         else if (el.dataset.number !== undefined) value = el.value === "" ? null : Number(el.value);
         this._setPath(this._editRoot(el.dataset.root), el.dataset.edit, value);
         if (el.dataset.rerender !== undefined) this._render();
+      })
+    );
+    root.querySelectorAll("[data-sig-field]").forEach((el) =>
+      el.addEventListener("change", () => {
+        const sig = this._roomDraft.signals[Number(el.dataset.sig)];
+        const light = el.dataset.sigLight;
+        const field = el.dataset.sigField;
+        if (field === "flash") sig.flash = el.checked;
+        else if (field === "include") {
+          if (el.checked) sig.lights[light] = { on: true, brightness_pct: 100, rgb: [255, 255, 255] };
+          else delete sig.lights[light];
+          this._render();
+        } else if (field === "rgb") {
+          const v = el.value.replace("#", "");
+          sig.lights[light] = { ...sig.lights[light], on: true, rgb: [0, 2, 4].map((i) => parseInt(v.slice(i, i + 2), 16)) };
+          delete sig.lights[light].color_temp_kelvin;
+        } else if (field === "brightness_pct") {
+          sig.lights[light] = { ...sig.lights[light], on: true, brightness_pct: Math.max(1, Math.min(100, Number(el.value) || 100)) };
+        }
       })
     );
     root.querySelectorAll("[data-rule-room]").forEach((el) =>
@@ -1772,6 +1836,14 @@ class RoomRoutinesPanel extends HTMLElement {
         this._roomDraft[el.dataset.list].splice(Number(el.dataset.row), 1);
         this._render();
         return;
+      case "signal-add":
+        this._roomDraft.signals.push({ name: "", when: { entity: "", state: "on" }, lights: {} });
+        this._render();
+        return;
+      case "signal-remove":
+        this._roomDraft.signals.splice(Number(el.dataset.row), 1);
+        this._render();
+        return;
       case "rule-add":
         (el.dataset.root === "house" ? this._houseRulesDraft.rules : this._roomDraft.rules).push({ when: { entity: "", state: "on" }, action: "nothing", rooms: [] });
         this._render();
@@ -1844,6 +1916,7 @@ class RoomRoutinesPanel extends HTMLElement {
           starters: this._cleanConds(r.starters),
           only_when: this._cleanConds(r.only_when),
           rules: this._cleanRules(r.rules, false),
+          signals: this._cleanSignals(r.signals),
           timers: r.timers.map((t) => {
             const out = { at: t.at || "", action: t.action || "on", days: t.days || "every_day" };
             if (out.days === "days") out.weekdays = t.weekdays || [];
@@ -2035,6 +2108,11 @@ const STYLES = `
   .btn.danger { border-color: var(--error-color, #db4437); color: var(--error-color, #db4437); }
   .btn ha-icon { --mdc-icon-size:18px; }
   .daylabel { font-size:13px; color: var(--secondary-text-color); margin:8px 0 4px; }
+  .signal { color: var(--accent-color, #7a3fd1); font-weight: 600; }
+  .signal-row .name { width: 100%; max-width: 22rem; }
+  .siglights { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 6px 0; }
+  .siglight { display: flex; align-items: center; gap: 6px; }
+  .siglight input[type=color] { width: 2.4rem; height: 1.8rem; padding: 0; border: 1px solid var(--divider-color); border-radius: 4px; background: none; }
   .daybar { position:relative; height:36px; border-radius:8px; overflow:hidden; background: var(--secondary-background-color); }
   .band { position:absolute; top:0; bottom:0; display:flex; align-items:center; justify-content:center; color:#fff; font-size:12px; text-shadow:0 1px 2px rgba(0,0,0,.4); overflow:hidden; white-space:nowrap; opacity:.85; }
   .band span { overflow:hidden; text-overflow:ellipsis; padding:0 4px; }

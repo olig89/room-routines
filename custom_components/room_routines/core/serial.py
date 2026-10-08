@@ -55,6 +55,7 @@ from typing import Any
 from .looks import NOTHING, LightTarget, Look
 from .periods import Period, Schedule, default_schedule
 from .room import RoomConfig
+from .signals import signal_from
 from .rules import condition_from, rule_from
 from .timers import timer_from
 from .tracks import (
@@ -181,6 +182,7 @@ def room_from(data: Mapping[str, Any]) -> RoomConfig:
         starters=tuple(condition_from(c) for c in data.get("starters") or ()),
         only_when=tuple(condition_from(c) for c in data.get("only_when") or ()),
         rules=tuple(rule_from(r) for r in data.get("rules") or ()),
+        signals=tuple(signal_from(s) for s in data.get("signals") or ()),
     )
 
 

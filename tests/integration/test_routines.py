@@ -314,3 +314,33 @@ async def test_save_look_writes_the_someone_table(hass, lights, hass_ws_client):
     stored = hass.config_entries.async_get_entry(entry.entry_id).options["rooms"]["office"]
     assert stored["someone_looks"]["Day"]["lights"][PLAY]["brightness_pct"] == 80
     assert "Day" not in stored["looks"]
+
+
+IRIS = "light.office_iris"
+CALL = "binary_sensor.in_a_call"
+PURPLE = {"on": True, "brightness_pct": 100, "rgb": [102, 0, 255]}
+
+
+async def test_a_call_signal_takes_the_iris_and_gives_it_back(hass, lights, freezer):
+    hass.states.async_set(IRIS, "off", {"supported_features": LightEntityFeature.TRANSITION})
+    hass.states.async_set(CALL, "off")
+    signal = {"name": "In a call", "when": {"entity": CALL, "state": "on"}, "lights": {IRIS: PURPLE}}
+    focus = {"lights": {PLAY: FOCUS["lights"][PLAY], IRIS: FOCUS["lights"][PLAY]}}
+    await setup(hass, lights=[PLAY, IRIS], looks={"Morning": focus, "Evening": DARK}, signals=[signal])
+    await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
+    await hass.async_block_till_done()
+    hass.states.async_set(IRIS, "on", {"brightness": 102, "supported_features": LightEntityFeature.TRANSITION})
+    hass.states.async_set(CALL, "on")
+    await hass.async_block_till_done()
+    call = lights.of("turn_on")[-1]
+    assert call["entity_id"] == IRIS and call["rgb_color"] == [102, 0, 255]
+    # Someone changes the Iris during the call: the room isn't paused by it.
+    await at(hass, freezer, "2026-09-28 07:00:30+00:00")
+    hass.states.async_set(IRIS, "on", {"brightness": 30, "supported_features": LightEntityFeature.TRANSITION})
+    await hass.async_block_till_done()
+    assert not room(hass).paused
+    attrs = hass.states.get(STATUS).attributes
+    hass.states.async_set(CALL, "off")
+    await hass.async_block_till_done()
+    back = lights.of("turn_on")[-1]
+    assert back["entity_id"] == IRIS and back["brightness_pct"] == 40 and "rgb_color" not in back
