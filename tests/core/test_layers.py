@@ -103,3 +103,29 @@ def test_a_picked_up_motion_room_waits_for_its_sensors_before_counting_down():
 def test_a_room_with_only_dark_day_looks_has_a_look():
     room = Room(office(looks={}, dim_looks={"Day": Look({PLAY: DARK})}), default_schedule(), "Day", False, at(28, 10))
     assert room.has_any_look()
+
+
+def test_a_silent_presence_sensor_keeps_a_picked_up_room_lit_until_it_reports():
+    # The auditor's case: the PIR has reported, the mmWave hold hasn't.
+    hold = "binary_sensor.presence"
+    after = Room(office(triggers=(MOTION,), holds=(hold,), timeout=timedelta(seconds=30)),
+                 default_schedule(), "Day", True, at(28, 11))
+    after.unheard |= {MOTION, hold}
+    after.restore(at(28, 10), False, at(28, 11))
+    after.sensor(MOTION, True, at(28, 11, 1))
+    after.sensor(MOTION, False, at(28, 11, 2))
+    assert after.deadline is None  # the presence sensor hasn't said "nobody" yet
+    after.sensor(hold, False, at(28, 11, 3))
+    assert after.deadline == at(28, 11, 3) + timedelta(seconds=30)
+
+
+def test_a_sensor_that_never_reports_stops_counting_after_fifteen_minutes():
+    hold = "binary_sensor.presence"
+    after = Room(office(triggers=(MOTION,), holds=(hold,), timeout=timedelta(seconds=30)),
+                 default_schedule(), "Day", True, at(28, 11))
+    after.unheard |= {MOTION, hold}
+    after.restore(at(28, 10), False, at(28, 11))
+    after.sensor(MOTION, False, at(28, 11, 1))
+    assert after.deadline is None
+    d = after.tick(at(28, 11, 16))
+    assert after.deadline == at(28, 11, 16) + timedelta(seconds=30) and "lights off in 30 s" in d.reason

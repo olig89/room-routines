@@ -92,6 +92,8 @@ LEAVE = "leave"
 ROUTINE = "routine"
 ADOPT_WAIT = timedelta(seconds=3)  # let a hand switch-on settle before taking over
 BLEND_STEP = timedelta(minutes=2)  # how often a blending room is moved on
+# After a restart, how long a sensor that hasn't reported counts as "someone's there".
+UNHEARD_FOR = timedelta(minutes=15)
 NO_LOOK = "the room has no look to switch on in any period: set one in its looks table"
 
 SceneReader = Callable[[str], Mapping[str, LightTarget] | None]
@@ -247,6 +249,7 @@ class Room:
         # Sensors with no real state yet (just after a restart): a picked-up room
         # doesn't count down on them until they report.
         self.unheard: set[str] = set()
+        self.unheard_until: datetime | None = None
         self.deadline: datetime | None = None
         self.cooldown_until: datetime | None = None
         self.stealth = stealth
@@ -273,6 +276,10 @@ class Room:
             return False
         if self._any(self.config.triggers):
             return True
+        if self.state is State.OWNED and self.unheard_until is not None and self.unheard & (
+            set(self.config.triggers) | set(self.config.holds)
+        ):
+            return True  # just after a restart: a sensor that hasn't reported yet
         return self.state is State.OWNED and self._any(self.config.holds)
 
     def source(self) -> LookSource:
@@ -466,10 +473,14 @@ class Room:
         self.owned_at = owned_at or now
         self.paused = paused
         decision = self._restyle("picked up again after a restart", blinds=False, now=now)
-        if self.unheard:
-            # A presence sensor that hasn't reported yet reads as "nobody": don't
-            # switch off on someone sitting still. Its first report decides.
-            return self._decide(f"{decision.reason}; waiting for the sensors to report", *decision.actions)
+        if self.unheard & (set(self.config.triggers) | set(self.config.holds)):
+            # A presence sensor that hasn't reported yet reads as "nobody": until each
+            # one reports (or UNHEARD_FOR passes), it counts as someone being there.
+            self.unheard_until = now + UNHEARD_FOR
+            return self._decide(
+                f"{decision.reason}; waiting for the sensors to report",
+                *decision.actions, WakeAt(self.unheard_until),
+            )
         countdown = self._check_timer(now)
         if countdown is not None:
             return self._decide(f"{decision.reason}; {countdown.reason}", *decision.actions, *countdown.actions)
@@ -663,6 +674,13 @@ class Room:
         return self._check_timer(now) or self._decide(f"stealth mode off: {self.state.value}")
 
     def tick(self, now: datetime) -> Decision:
+        if self.unheard_until is not None and now >= self.unheard_until:
+            # Sensors still silent: stop waiting for them and count down as usual.
+            self.unheard.clear()
+            self.unheard_until = None
+            countdown = self._check_timer(now)
+            if countdown is not None:
+                return countdown
         if self.adopt_at is not None and now >= self.adopt_at:
             self.adopt_at = None
             if self.state is State.MANUAL:

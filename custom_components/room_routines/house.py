@@ -227,10 +227,6 @@ class RoomRunner:
                 self._grace_end = async_call_later(
                     self.hass, RESTORE_GRACE.total_seconds() + 1, self._grace_over
                 )
-        elif self.room is not None and self._room_mode == MODE_LIVE and self.mode == MODE_LIVE:
-            # Rebuilt while live: a running routine carries on, as after a restart.
-            if (carry := self.room.memory()) is not None:
-                self._restore, self._restore_until = carry, now + RESTORE_GRACE
         self._room_mode = self.mode
         lights_on = self.mode == MODE_LIVE and self._any_on()
         self.room = Room(
