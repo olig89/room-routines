@@ -161,3 +161,10 @@ def test_handing_signals_back_and_clearing_an_effect():
     d = room.release_signals(at(28, 10, 5))
     (back,) = looks_sent(d)
     assert back.effect == "off" and back.look == Look({IRIS: WHITE}) and not room.held
+
+
+def test_a_signal_whose_entity_is_gone_lets_go():
+    room = make()
+    room.set_signals({CALL: "on"}, {IRIS: WHITE}, at(28, 10))
+    d = room.set_signals({}, {IRIS: PURPLE}, at(28, 10, 1))  # the entity was deleted
+    assert not room.held and looks_sent(d)[0].look == Look({IRIS: WHITE})

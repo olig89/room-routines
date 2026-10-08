@@ -188,3 +188,45 @@ def test_a_hand_switch_on_taken_over_in_a_motion_room_is_still_a_visit():
     room.lights(True, False, at(28, 18))
     room.tick(at(28, 18, 0, 4))
     assert room.someone_on and not room.ambient_on
+
+
+def test_a_period_change_mid_visit_doesnt_strand_what_someone_lit():
+    # Morning: routine lights both, someone brightens both; Evening: the routine
+    # lights only the ceiling and Evening has no Someone's there look.
+    room = Room(hall(
+        lights=(CEILING, LAMP),
+        looks={"Morning": Look({CEILING: DIM, LAMP: DIM}), "Evening": Look({CEILING: DIM})},
+        someone_looks={"Morning": Look({CEILING: BRIGHT, LAMP: BRIGHT})},
+    ), default_schedule(), "Morning", False, at(28, 8))
+    room.start(at(28, 8), "timer")
+    room.sensor(MOTION, True, at(28, 8, 1))
+    room.sensor(MOTION, False, at(28, 8, 2))  # counting down
+    d = room.period_changed("Evening", at(28, 8, 2, 10))
+    offs = [a for a in d.actions if isinstance(a, TurnOff)]
+    assert offs and offs[0].lights == (LAMP,)
+    d = room.tick(at(28, 8, 3))
+    assert applied(d).look == Look({CEILING: DIM})
+    assert not [a for a in d.actions if isinstance(a, TurnOff)]
+
+
+def test_a_do_nothing_period_after_a_boost_switches_off_what_was_lit():
+    room = Room(hall(
+        looks={"Morning": Look({CEILING: DIM}), "Day": Look(nothing=True)},
+        someone_looks={"Morning": Look({CEILING: BRIGHT})},
+    ), default_schedule(), "Morning", False, at(28, 8))
+    room.start(at(28, 8), "timer")
+    room.sensor(MOTION, True, at(28, 8, 1))
+    d = room.period_changed("Day", at(28, 9))
+    offs = [a for a in d.actions if isinstance(a, TurnOff)]
+    assert offs and offs[0].lights == (CEILING,)
+
+
+def test_emptying_over_a_do_nothing_period_switches_off_what_was_lit():
+    room = make(hall(looks={"Morning": Look({CEILING: DIM}), "Evening": Look(nothing=True)},
+                     someone_looks={"Evening": Look({CEILING: BRIGHT})}))
+    room.ambient_on, room.state = True, State.OWNED
+    room.sensor(MOTION, True, at(28, 18, 30))
+    room.sensor(MOTION, False, at(28, 18, 31))
+    d = room.tick(at(28, 18, 32))
+    (off,) = [a for a in d.actions if isinstance(a, TurnOff)]
+    assert off.lights == (CEILING,) and not [a for a in d.actions if isinstance(a, ApplyLook)]

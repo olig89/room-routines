@@ -287,6 +287,9 @@ class Room:
         # Which layers are lit while OWNED: the routine (Ambient), motion (Someone's there).
         self.ambient_on = False
         self.someone_on = False
+        # Lights Someone's there has lit over the routine: handed back (or off)
+        # when it lets go, whatever period it is by then.
+        self.someone_lit: set[str] = set()
         self.sensors: dict[str, bool] = {}
         # Sensors with no real state yet (just after a restart): a picked-up room
         # doesn't count down on them until they report.
@@ -457,6 +460,24 @@ class Room:
         look, factor = self._to_apply(self._look(layer), layer)
         return look, factor, self._look_name(layer, tail=False)
 
+    def _note_someone_lit(self) -> None:
+        """Remember the lights this period's Someone's there look lights over the routine."""
+        if self._boosting():
+            lit = self._someone_lit()
+            self.someone_lit |= lit if lit is not None else set(self.config.switchable())
+
+    def _handover(self, look: Look | None, factor: float) -> tuple[str, ...]:
+        """Someone's there lets go of the lights it lit: those the routine's look
+        (None: "do nothing") doesn't light have nothing below them, so they go off."""
+        if look is None:
+            kept: set[str] = set()
+        else:
+            plain = self._plain(look, factor)
+            kept = set(plain.lit()) if plain is not None else set(self.config.switchable())
+        out = tuple(l for l in self.config.switchable() if l in self.someone_lit and l not in kept)
+        self.someone_lit.clear()
+        return out
+
     def _someone_lit(self) -> set[str] | None:
         """The lights this period's Someone's there look lights (None: can't tell)."""
         own = self._someone_source(self.period)
@@ -570,8 +591,9 @@ class Room:
         """The entities signals read changed: take, change or give back lights.
         ``current`` is how the lights are now (what to go back to later). An entity
         that's unavailable or unknown changes nothing (a blip isn't the end of a
-        call). ``flash`` False for start-up: the signal isn't new."""
-        unsure = {s.when.entity for s in self.config.signals if states.get(s.when.entity) in (None, *("unavailable", "unknown"))}
+        call); a missing entity counts as false. ``flash`` False when the signal
+        isn't new (start-up, an entity reporting in late)."""
+        unsure = {s.when.entity for s in self.config.signals if states.get(s.when.entity) in ("unavailable", "unknown")}
         new = held_by(self.config.signals, states, self.config.lights)
         for light, signal in self.held.items():
             if light not in new and signal.when.entity in unsure:
@@ -670,6 +692,7 @@ class Room:
         self.ambient.lights_changed(True, now)
 
     def _go_idle(self) -> None:
+        self.someone_lit.clear()
         for light in self.held:
             self.before[light] = LightTarget(False)  # the room went off under the signal
         self.state = State.IDLE
@@ -791,6 +814,7 @@ class Room:
         self.deadline = None
         if self.paused:
             return self._decide(f"motion at {entity}: lights left as changed by hand")
+        self._note_someone_lit()
         look, factor, name = self._target(now)
         return self._decide(f"motion at {entity}: {name}", ApplyLook(look, self._power_for(look), factor=factor))
 
@@ -918,6 +942,19 @@ class Room:
                 lit, factor, name = self._target(now)
                 actions.append(ApplyLook(lit, self._power_for(lit), self.config.drift, factor))
                 reason += f": drifting to the {name}"
+                if self._boosting():
+                    self._note_someone_lit()
+                elif self.someone_lit:
+                    # This period has no Someone's there look: hand its lights back.
+                    nothing = self._look(Layer.AMBIENT).nothing
+                    off = self._handover(None if nothing else lit, factor)
+                    if off:
+                        actions.append(TurnOff(off, self.config.drift))
+        elif self.state is State.OWNED and self.someone_lit and not self.paused:
+            # Nothing to show now ("do nothing"): what Someone's there lit goes off.
+            off = self._handover(None, 1.0)
+            if off:
+                actions.append(TurnOff(off, self.config.drift))
         return self._decide(reason, *actions)
 
     def set_context(
@@ -950,6 +987,7 @@ class Room:
             return self._unchanged()
         if self.blending(now) is None:
             return self._unchanged()
+        self._note_someone_lit()
         look, factor, name = self._target(now)  # Someone's there's lights stay over the blend
         if look == self._last_blend:
             return self._unchanged()
@@ -990,21 +1028,17 @@ class Room:
             self.someone_on = False
             self.deadline = None
             self._last_blend = None
-            lit = self._someone_lit()
             if self.paused:
+                self.someone_lit.clear()
                 return self._decide("empty: the routine carries on, lights left as changed by hand")
+            nothing = self._look(Layer.AMBIENT).nothing
             look, factor, name = self._target(now)
-            switchable = self.config.switchable()
-            if look.nothing:
-                # The routine does nothing in this period: off with what Someone's there lit.
-                off = tuple(l for l in switchable if lit is None or l in lit)
-                return self._decide(f"empty: {name} is 'do nothing', so lights off", TurnOff(off, fade))
-            plain = self._plain(look, factor)
-            named = set(plain.lights) if plain is not None else set(switchable)
-            extra = tuple(l for l in switchable if lit and l in lit and l not in named)
-            actions: list[Action] = [ApplyLook(look, self._power_for(look), fade, factor)]
-            if extra:
-                actions.append(TurnOff(extra, fade))  # nothing below wants them: off
+            off = self._handover(None if nothing else look, factor)
+            actions: list[Action] = [] if nothing else [ApplyLook(look, self._power_for(look), fade, factor)]
+            if off:
+                actions.append(TurnOff(off, fade))  # nothing below wants them: off
+            if nothing:
+                return self._decide(f"empty: {name} is 'do nothing', so what was lit goes off", *actions)
             return self._decide(f"empty: back to the {name}", *actions)
         self._go_idle()
         self.ambient.lights_changed(False, now)

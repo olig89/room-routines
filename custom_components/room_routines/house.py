@@ -160,6 +160,9 @@ class RoomRunner:
         self._memory_read = False
         self._room_mode: str | None = None  # the mode the current core room was built for
         self._grace_end: CALLBACK_TYPE | None = None
+        # Lights a signal left with an effect while switching them off: the next
+        # switch-on clears it.
+        self._effect_left: set[str] = set()
         # The room's own rules first, then the house's that cover it.
         self.rules: tuple[Rule, ...] = tuple(self.config.rules) + tuple(
             r for r in house.house_rules if r.applies_to(self.room_id)
@@ -362,7 +365,9 @@ class RoomRunner:
         if entity in self.room.held:
             # A signal holds it: a change to it is the signal's, or shows over it until
             # the signal changes. Switched off by hand, it stays off afterwards.
-            if new.state == STATE_OFF:
+            if new.state == STATE_OFF and not self.matcher.is_own(
+                entity, dt_util.now(), False, None, context_id=new.context.id, parent_id=new.context.parent_id
+            ):
                 self.room.held_switched_off(entity)
                 self._persist()
             return
@@ -441,7 +446,10 @@ class RoomRunner:
         rule, rule_text, unmet_text = self._context(self._states())
         self._run(self.room.set_context(rule, rule_text, unmet_text, now))
         if self.config.signals:
-            self._run(self.room.set_signals(self._states(), capture(self.hass, self.config).lights, now))
+            real_change = old is not None and old.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+            self._run(self.room.set_signals(
+                self._states(), capture(self.hass, self.config).lights, now, flash=real_change
+            ))
         # A starter fires when it becomes true, not while it stays true.
         before = {entity: old.state if old is not None else None}
         after = {entity: new.state if new is not None else None}
@@ -664,6 +672,8 @@ class RoomRunner:
         if transition:
             data["transition"] = transition.total_seconds()
         if not target.on:
+            if effect == "off":
+                self._effect_left.add(light)  # can't clear an effect while switching off
             await self.hass.services.async_call("light", "turn_off", data, context=ctx)
             return
         if target.brightness_pct is not None:
@@ -673,8 +683,12 @@ class RoomRunner:
         if target.rgb is not None:
             data["rgb_color"] = list(target.rgb)
         state = self.hass.states.get(light)
-        if effect and state is not None and effect in (state.attributes.get("effect_list") or []):
+        effects = (state.attributes.get("effect_list") or []) if state is not None else []
+        if not effect and light in self._effect_left:
+            effect = "off"
+        if effect and effect in effects:
             data["effect"] = effect
+        self._effect_left.discard(light)
         await self.hass.services.async_call("light", "turn_on", data, context=ctx)
         if flash:
             # After the colour, as its own command: some lights drop a colour sent with a flash.
