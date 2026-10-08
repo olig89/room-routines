@@ -7,7 +7,7 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.6.1";
+const PANEL_VERSION = "0.6.2";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
@@ -328,7 +328,7 @@ class RoomRoutinesPanel extends HTMLElement {
     const pct = t.brightness_pct ?? 100;
     const periods = t.periods?.length ? list(t.periods.map(esc)) : "no periods";
     return `<div><ha-icon icon="${TRACK_ICON[house.track]}"></ha-icon> Today is a <b>${esc(TRACK_LABEL[house.track])}</b>${t.reason ? `: ${esc(t.reason)}` : ""}.${house.track_by_hand ? " Chosen by hand until the next period." : ""}</div>
-      <div class="meta">Dark Days can happen in ${periods}: when the sun is down, or the light is below <b>${esc(t.dark_below_pct)} %</b> of a clear day at the same sun height (Normal again above <b>${esc(t.normal_above_pct)} %</b>). ${from}
+      <div class="meta">Dark Days can happen in ${periods}: when the sun is down,${t.weather && t.dark_below_wm2 ? ` when less than <b>${esc(t.dark_below_wm2)} W/m²</b> of sunlight reaches the ground,` : ""} or when the light is below <b>${esc(t.dark_below_pct)} %</b> of a clear day at the same sun height (Normal again above <b>${esc(t.normal_above_pct)} %</b>). ${from}
       Dark Day brightness for Normal looks: ${pct === 100 ? "unchanged" : `<b>${esc(pct)} %</b>`}.</div>
       <div class="meta nowlines">${now.map((l) => `<div>${l}</div>`).join("")}<div>Sun: ${t.sun_down ? `below the horizon (${esc(t.sun_elevation)}°)` : `${esc(t.sun_elevation)}° above the horizon`}.</div></div>`;
   }
@@ -336,7 +336,7 @@ class RoomRoutinesPanel extends HTMLElement {
   _weatherNow(t) {
     switch (t.weather_state) {
       case "ok":
-        return `<b>${esc(t.weather_pct)} %</b> of a clear day${t.cloud_cover != null ? `, ${esc(t.cloud_cover)} % cloud` : ""} (at ${esc(hhmm(t.weather_at))}).`;
+        return `<b>${esc(t.weather_pct)} %</b> of a clear day${t.sunlight != null ? `, ${esc(t.sunlight)} W/m² of sunlight` : ""}${t.cloud_cover != null ? `, ${esc(t.cloud_cover)} % cloud` : ""} (at ${esc(hhmm(t.weather_at))}).`;
       case "sun_down":
         return "nothing to compare while the sun is down.";
       case "unreachable":
@@ -1176,6 +1176,7 @@ class RoomRoutinesPanel extends HTMLElement {
       dark_below_pct: t.dark_below_pct ?? 40,
       normal_above_pct: t.normal_above_pct ?? 55,
       brightness_pct: t.brightness_pct ?? 100,
+      dark_below_wm2: t.dark_below_wm2 ?? 150,
     };
     this._tracksError = null;
   }
@@ -1223,6 +1224,8 @@ class RoomRoutinesPanel extends HTMLElement {
           <label>Normal again above <span class="inputunit"><input type="number" min="1" max="200" step="5" value="${esc(t.normal_above_pct)}" data-tracks-field="normal_above_pct"> %</span>
             <span class="help">Higher than the Dark Day level, so the day doesn't flip back and forth around one level.</span></label>
         </div>
+        <label>Also a Dark Day below <span class="inputunit"><input type="number" min="0" max="600" step="10" value="${esc(t.dark_below_wm2)}" data-tracks-field="dark_below_wm2"> W/m²</span>
+          <span class="help">Of sunlight reaching the ground, from the weather, whatever a clear day would give. In winter the sun stays so low that even a clear noon is darker than a grey summer day: at 150, mid-winter days are dark all day, and summer barely changes. Normal again above 1.2 times this. 0 switches it off.</span></label>
         <h3>Normal looks on Dark Days</h3>
         <label>Brightness <span class="inputunit"><input type="number" min="1" max="300" step="5" value="${esc(t.brightness_pct)}" data-tracks-field="brightness_pct"> %</span>
           <span class="help">For periods without their own Dark Day look: their Normal look at this brightness. 100 leaves it as it is; below 100 dims (a light at 66 % at 50 % comes on at 33 %); above 100 brightens, up to each light's maximum. Colours stay; lights set to their last brightness, and scenes from other apps (such as the Hue app), are left as they are.</span></label>
@@ -1635,6 +1638,7 @@ class RoomRoutinesPanel extends HTMLElement {
             dark_below_pct: t.dark_below_pct ?? 40,
             normal_above_pct: t.normal_above_pct ?? 55,
             brightness_pct: t.brightness_pct ?? 100,
+            dark_below_wm2: t.dark_below_wm2 ?? 150,
           },
           t.on ? "Saved the Dark Day settings." : "Dark Days are off."
         );

@@ -951,6 +951,7 @@ class House:
             "pct": reading.pct,
             "source": reading.source,
             "weather_pct": weather.pct,
+            "sunlight": round(weather.sunlight) if weather.sunlight is not None else None,
             "cloud_cover": self.weather.get("cloud_cover") if weather.pct is not None else None,
             "sensor_pct": sensor.pct,
             "level": round(sensor.lux) if sensor.lux is not None else None,
@@ -1036,7 +1037,7 @@ class House:
             "radiation": radiation, "clear": round(clear), "cloud_cover": cloud, "pct": pct, "at": dt_util.now(),
         }
         self.weather_failed_at = None
-        self.chooser.weather(pct, dt_util.now())
+        self.chooser.weather(pct, dt_util.now(), radiation)
         self._check_track(dt_util.now())
 
     # -- what a clear day looks like to the light sensor --

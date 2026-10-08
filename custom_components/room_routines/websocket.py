@@ -493,6 +493,7 @@ def ws_save_periods(hass: HomeAssistant, connection: websocket_api.ActiveConnect
         vol.Optional("dark_below_pct", default=40): vol.All(vol.Coerce(float), vol.Range(min=0, max=200)),
         vol.Optional("normal_above_pct", default=55): vol.All(vol.Coerce(float), vol.Range(min=0, max=200)),
         vol.Optional("brightness_pct", default=100): vol.All(vol.Coerce(float), vol.Range(min=1, max=300)),
+        vol.Optional("dark_below_wm2", default=150): vol.All(vol.Coerce(float), vol.Range(min=0, max=600)),
     }
 )
 @websocket_api.require_admin

@@ -7,7 +7,8 @@ The config entry's options hold plain JSON:
       "alt_days": [5, 6],
       "tracks": {"on": true, "weather": true, "sensor": "sensor.window_lux", "fallback": null,
                  "first": "weather", "periods": ["Morning", "Day"],
-                 "dark_below_pct": 40, "normal_above_pct": 55, "brightness_pct": 50},
+                 "dark_below_pct": 40, "normal_above_pct": 55, "brightness_pct": 50,
+                 "dark_below_wm2": 150},   (sunlight floor in W/m², 0 = off)
       "rooms": {
         "<room id>": {
           "name": "Downstairs Toilet",
@@ -54,7 +55,14 @@ from .periods import Period, Schedule, default_schedule
 from .room import RoomConfig
 from .rules import condition_from, rule_from
 from .timers import timer_from
-from .tracks import DEFAULT_BRIGHTNESS_PCT, DEFAULT_DARK_BELOW, DEFAULT_NORMAL_ABOVE, WEATHER, TrackSettings
+from .tracks import (
+    DEFAULT_BRIGHTNESS_PCT,
+    DEFAULT_DARK_BELOW,
+    DEFAULT_DARK_BELOW_WM2,
+    DEFAULT_NORMAL_ABOVE,
+    WEATHER,
+    TrackSettings,
+)
 
 DEFAULT_THRESHOLD_LUX = 50.0
 DEFAULT_TIMEOUT_S = 30
@@ -200,6 +208,7 @@ def tracks_from(options: Mapping[str, Any]) -> TrackSettings:
         dark_below=float(data.get("dark_below_pct", DEFAULT_DARK_BELOW)),
         normal_above=float(data.get("normal_above_pct", DEFAULT_NORMAL_ABOVE)),
         brightness_pct=float(data.get("brightness_pct", data.get("auto_dim_pct", DEFAULT_BRIGHTNESS_PCT))),
+        dark_below_wm2=float(data.get("dark_below_wm2", DEFAULT_DARK_BELOW_WM2)),
     )
 
 
@@ -214,4 +223,5 @@ def tracks_to(settings: TrackSettings) -> dict[str, Any]:
         "dark_below_pct": settings.dark_below,
         "normal_above_pct": settings.normal_above,
         "brightness_pct": settings.brightness_pct,
+        "dark_below_wm2": settings.dark_below_wm2,
     }

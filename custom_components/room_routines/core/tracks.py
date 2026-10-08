@@ -23,7 +23,12 @@ Rules, in order:
 1. Dark Days only happen in the periods chosen for them (by default the ones
    that start between 06:00 and 15:00). Any other period is a Normal day.
 2. With the sun down (below ``MIN_ELEVATION``) it's a Dark Day.
-3. Below ``dark_below`` percent of a clear day it becomes a Dark Day; above
+3. With the weather on and less than ``dark_below_wm2`` W/m² of sunlight
+   reaching the ground, it's a Dark Day whatever a clear day would give: a
+   clear winter noon is still darker indoors than a grey summer day. It's
+   Normal again only above ``NORMAL_AGAIN_RATIO`` times that (and only if rule 4
+   agrees). 0 switches this rule off.
+4. Below ``dark_below`` percent of a clear day it becomes a Dark Day; above
    ``normal_above`` it becomes Normal again; in between it stays as it is.
    The day holds for at least ``min_hold`` before changing again, so passing
    clouds don't flip it back and forth. At start-up and at each period start it
@@ -56,6 +61,9 @@ SOURCES = (WEATHER, SENSOR)
 DEFAULT_DARK_BELOW = 40.0
 DEFAULT_NORMAL_ABOVE = 55.0
 DEFAULT_BRIGHTNESS_PCT = 100.0
+DEFAULT_DARK_BELOW_WM2 = 150.0  # sunlight on the ground, W/m²; 0 = off
+MAX_DARK_BELOW_WM2 = 600.0
+NORMAL_AGAIN_RATIO = 1.2  # Normal again above 1.2 × the sunlight floor
 MAX_BRIGHTNESS_PCT = 300.0
 DEFAULT_FIRST_START = time(6, 0)
 DEFAULT_LAST_START = time(15, 0)
@@ -78,6 +86,7 @@ class TrackSettings:
     dark_below: float = DEFAULT_DARK_BELOW  # percent of a clear day
     normal_above: float = DEFAULT_NORMAL_ABOVE
     brightness_pct: float = DEFAULT_BRIGHTNESS_PCT
+    dark_below_wm2: float = DEFAULT_DARK_BELOW_WM2  # 0 = off
     window: timedelta = timedelta(minutes=15)
     min_hold: timedelta = timedelta(minutes=20)
 
@@ -86,6 +95,8 @@ class TrackSettings:
             raise ValueError(f"unknown source {self.first!r}")
         if not 0 <= self.dark_below < self.normal_above <= 200:
             raise ValueError("dark_below must be lower than normal_above")
+        if not 0 <= self.dark_below_wm2 <= MAX_DARK_BELOW_WM2:
+            raise ValueError(f"dark_below_wm2 must be between 0 and {MAX_DARK_BELOW_WM2:g}")
         if not 1 <= self.brightness_pct <= MAX_BRIGHTNESS_PCT:
             raise ValueError(f"brightness_pct must be between 1 and {MAX_BRIGHTNESS_PCT:g}")
 
@@ -154,6 +165,7 @@ class Reading:
     source: str | None = None  # WEATHER or SENSOR
     lux: float | None = None  # the sensor's average, for a sensor reading
     sensor: str | None = None
+    sunlight: float | None = None  # W/m² on the ground, for a weather reading
 
 
 @dataclass
@@ -169,6 +181,7 @@ class TrackChooser:
     backup_ok: bool = False
     weather_pct: float | None = None
     weather_at: datetime | None = None
+    weather_sunlight: float | None = None
     references: dict[str, DaylightReference] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -188,23 +201,21 @@ class TrackChooser:
             if value is not None:
                 self.backup.add(value, at)
 
-    def weather(self, pct: float | None, at: datetime) -> None:
+    def weather(self, pct: float | None, at: datetime, sunlight: float | None = None) -> None:
         """The weather's percent of a clear day (``None``: no answer, e.g. the sun
-        too low to tell)."""
+        too low to tell) and the sunlight it measured, in W/m²."""
         self.weather_pct = pct
         self.weather_at = at
+        self.weather_sunlight = sunlight
 
     # -- readings --
 
     def weather_reading(self, now: datetime) -> Reading:
-        if (
-            not self.settings.weather
-            or self.weather_pct is None
-            or self.weather_at is None
-            or now - self.weather_at > WEATHER_STALE
-        ):
+        if not self.settings.weather or self.weather_at is None or now - self.weather_at > WEATHER_STALE:
             return Reading(None)
-        return Reading(self.weather_pct, WEATHER)
+        if self.weather_pct is None:
+            return Reading(None, sunlight=self.weather_sunlight)
+        return Reading(self.weather_pct, WEATHER, sunlight=self.weather_sunlight)
 
     def sensor_level(self, now: datetime) -> tuple[float | None, str | None]:
         """The averaged light level and the sensor it came from."""
@@ -244,6 +255,11 @@ class TrackChooser:
         if sun.elevation < MIN_ELEVATION:
             self.reason = "the sun is down"
             return DIM
+        floor = self.settings.dark_below_wm2
+        sunlight = self.weather_reading(now).sunlight if floor > 0 else None
+        if sunlight is not None and sunlight < floor:
+            self.reason = f"{round(sunlight)} W/m² of sunlight, below {floor:g}"
+            return DIM
         got = self.current(now, sun)
         if got.pct is None:
             self.reason = "no light reading"
@@ -252,9 +268,16 @@ class TrackChooser:
         self.reason = f"{round(got.pct)} % of a clear day, from {where}"
         if got.pct < self.settings.dark_below:
             return DIM
+        settled = first or self.since is None
+        if sunlight is not None and sunlight < floor * NORMAL_AGAIN_RATIO:
+            # Just above the sunlight floor: not bright enough to call it Normal yet.
+            self.reason = f"{round(sunlight)} W/m² of sunlight, just above {floor:g}"
+            if settled:
+                return DIM if sunlight < floor * (1 + NORMAL_AGAIN_RATIO) / 2 else NORMAL
+            return None
         if got.pct > self.settings.normal_above:
             return NORMAL
-        if first or self.since is None:
+        if settled:
             return DIM if got.pct < (self.settings.dark_below + self.settings.normal_above) / 2 else NORMAL
         return None  # in between: stays
 

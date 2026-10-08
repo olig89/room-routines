@@ -332,6 +332,7 @@ def set_tracks(options: Mapping[str, Any], data: Mapping[str, Any]) -> dict[str,
         "dark_below_pct": data.get("dark_below_pct", 40),
         "normal_above_pct": data.get("normal_above_pct", 55),
         "brightness_pct": data.get("brightness_pct", 100),
+        "dark_below_wm2": data.get("dark_below_wm2", 150),
     }
     try:
         settings = tracks_from({CONF_TRACKS: row})

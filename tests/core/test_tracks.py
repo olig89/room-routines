@@ -291,3 +291,73 @@ def test_brightening_stops_at_each_lights_maximum():
     assert up.lights["light.a"].brightness_pct == 60
     assert up.lights["light.b"].brightness_pct == 100  # not 120
     assert up.lights["light.c"] == ON
+
+
+# ---- the sunlight floor -----------------------------------------------------------
+
+
+def test_a_clear_winter_noon_is_dark_below_the_sunlight_floor():
+    # 31 Dec 2025, 12:00: a clear sky (95 % of a clear day) but only 80 W/m².
+    c = chooser()
+    c.weather(95.0, at(30, 12), 80.0)
+    assert c.update(at(30, 12), SunPosition(7.0, False), True, first=True)
+    assert c.track == DIM and c.reason == "80 W/m² of sunlight, below 150"
+
+
+def test_above_the_floor_the_clear_day_rule_decides():
+    c = chooser()
+    c.weather(95.0, at(30, 12), 400.0)
+    c.update(at(30, 12), HIGH, True, first=True)
+    assert c.track == NORMAL
+    c2 = chooser()
+    c2.weather(25.0, at(30, 12), 200.0)  # a grey summer day is still dark
+    c2.update(at(30, 12), HIGH, True, first=True)
+    assert c2.track == DIM
+
+
+def test_normal_again_only_well_above_the_floor():
+    c = chooser()
+    c.weather(90.0, at(30, 11), 120.0)
+    c.update(at(30, 11), HIGH, True, first=True)
+    assert c.track == DIM
+    c.weather(90.0, at(30, 11, 30), 170.0)  # above 150, under 180: stays dark
+    assert not c.update(at(30, 11, 30), HIGH, True)
+    assert c.reason == "170 W/m² of sunlight, just above 150"
+    c.weather(90.0, at(30, 11, 45), 190.0)
+    assert c.update(at(30, 11, 45), HIGH, True)
+    assert c.track == NORMAL
+
+
+def test_first_pick_just_above_the_floor_goes_by_the_middle():
+    c = chooser()
+    c.weather(90.0, at(30, 11), 160.0)  # middle of 150..180 is 165
+    c.update(at(30, 11), HIGH, True, first=True)
+    assert c.track == DIM
+    c2 = chooser()
+    c2.weather(90.0, at(30, 11), 170.0)
+    c2.update(at(30, 11), HIGH, True, first=True)
+    assert c2.track == NORMAL
+
+
+def test_the_floor_can_be_switched_off_and_needs_the_weather():
+    off = chooser(TrackSettings(on=True, sensor=WINDOW, dark_below_wm2=0))
+    off.weather(95.0, at(30, 12), 80.0)
+    off.update(at(30, 12), HIGH, True, first=True)
+    assert off.track == NORMAL
+    stale = chooser()
+    stale.weather(95.0, at(30, 9), 80.0)  # three hours old: ignored
+    stale.reading(WINDOW, 9000, at(30, 11, 50))
+    stale.update(at(30, 12), HIGH, True, first=True)
+    assert stale.track == NORMAL
+
+
+def test_the_floor_is_checked_and_stored():
+    with pytest.raises(ValueError):
+        TrackSettings(dark_below_wm2=-1)
+    with pytest.raises(ValueError):
+        TrackSettings(dark_below_wm2=601)
+    from custom_components.room_routines.core.serial import tracks_from, tracks_to
+
+    assert tracks_from({}).dark_below_wm2 == 150
+    s = TrackSettings(on=True, dark_below_wm2=120)
+    assert tracks_from({"tracks": tracks_to(s)}) == s

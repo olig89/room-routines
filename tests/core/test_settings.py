@@ -172,7 +172,7 @@ def test_dark_day_settings():
     options = set_tracks(base(), {"on": True, "sensor": "sensor.window", "dark_below_pct": 30, "normal_above_pct": 50})
     assert options["tracks"] == {
         "on": True, "weather": True, "sensor": "sensor.window", "fallback": None, "first": "weather",
-        "periods": None, "dark_below_pct": 30.0, "normal_above_pct": 50.0, "brightness_pct": 100.0,
+        "periods": None, "dark_below_pct": 30.0, "normal_above_pct": 50.0, "brightness_pct": 100.0, "dark_below_wm2": 150.0,
     }
     assert set_tracks(base(), {"brightness_pct": 150})["tracks"]["brightness_pct"] == 150.0
     assert "stray" not in options
