@@ -16,13 +16,13 @@ be a Home Assistant scene. A light switched on by hand is left alone, and change
 made by hand are remembered so the page can suggest better looks or times. Each
 room can run in log-only mode first.
 
-**Status: early development (0.6.0).** Install through HACS as a custom repository.
+**Status: early development (0.6.1).** Install through HACS as a custom repository.
 
 ## What you get
 
 - **A sidebar page** (admins only for now):
-  - **Rooms**: each room's mode, what it's doing and why, the switch-off countdown, its light level against the threshold, its sensors (lit when they see someone), its lights and the look for the current period.
-  - **Room detail**: a looks table (period × light) for Normal days and for Dark Days, with *Save as now* (saves the lights as a Home Assistant scene through the scene editor's own API, so the same scene can go on a wall button), *Pick a scene*, *Edit*, *Keep dark* and *Use previous* / *Use Normal*; suggestions from how the lights get changed by hand; what the room did, from Home Assistant's history; and for rooms in log-only, a **dry-run check** that pairs every switch the room would have made with the light's real switch and scores the match.
+  - **Status**: each room's mode, what it's doing and why, the switch-off countdown, its light level against the threshold, its sensors (lit when they see someone), its lights and the look for the current period.
+  - **Room detail**: a looks table (period × light) for Normal days and for Dark Days, with icon buttons under each period name: *Save as now* (saves the lights as a Home Assistant scene through the scene editor's own API, so the same scene can go on a wall button), *Pick a scene*, *Edit*, *Keep dark* and *Use previous* / *Use Normal*; suggestions from how the lights get changed by hand; what the room did, from Home Assistant's history; and for rooms in log-only, a **dry-run check** that pairs every switch the room would have made with the light's real switch and scores the match.
   - **Your day**: the periods as a 24-hour strip, with a row for days that start differently, and whether today is a Normal day or a Dark Day, and why.
   - **Settings** (administrators only, and refused to anyone else by the server): add, change or remove rooms, with lights and sensors suggested from the area and any entity choosable; change, add, rename or remove periods (rooms' looks follow a renamed period); Dark Days (where the reading comes from, which periods, the thresholds and the brightness).
   - A header with the current period, a stealth switch, and a banner across the page while stealth is on.

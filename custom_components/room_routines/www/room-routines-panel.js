@@ -7,7 +7,7 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.6.0";
+const PANEL_VERSION = "0.6.1";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
@@ -268,7 +268,7 @@ class RoomRoutinesPanel extends HTMLElement {
         ${house ? this._headerNow(house) : ""}
       </div>
       <div class="tabs">
-        <button class="tab ${this._tab === "rooms" ? "on" : ""}" data-tab="rooms">Rooms</button>
+        <button class="tab ${this._tab === "rooms" ? "on" : ""}" data-tab="rooms">Status</button>
         <button class="tab ${this._tab === "day" ? "on" : ""}" data-tab="day">Your day</button>
         ${admin ? `<button class="tab ${this._tab === "settings" ? "on" : ""}" data-tab="settings">Settings</button>` : ""}
       </div>
@@ -537,9 +537,9 @@ class RoomRoutinesPanel extends HTMLElement {
           cells = lights.map((l) => `<td class="muted">${borrowed ? `as ${esc(borrowed)}` : "—"}</td>`).join("");
         }
         return `<tr class="${now ? "nowrow" : ""}">
-          <th><span class="dot" style="background:${this._periodColour(p)}"></span>${esc(p)}${now ? ` <small>now</small>` : ""}</th>
+          <th class="periodcell"><div><span class="dot" style="background:${this._periodColour(p)}"></span>${esc(p)}${now ? ` <small>now</small>` : ""}</div>
+            ${editing || picking ? "" : this._lookActions(room, p, own)}</th>
           ${cells}
-          <td class="actions">${editing || picking ? "" : this._lookActions(room, p, own)}</td>
         </tr>`;
       })
       .join("");
@@ -576,7 +576,7 @@ class RoomRoutinesPanel extends HTMLElement {
         ${trackTabs}
         ${trackHelp}
         <div class="tablewrap"><table class="looks">
-          <tr><th>Period</th>${lights.map((l) => `<th>${esc(this._name(l))}</th>`).join("")}<th></th></tr>
+          <tr><th>Period</th>${lights.map((l) => `<th>${esc(this._name(l))}</th>`).join("")}</tr>
           ${rows}
         </table></div>
       </div>
@@ -609,19 +609,23 @@ class RoomRoutinesPanel extends HTMLElement {
     return null;
   }
 
+  // The look's actions as a row of icon buttons under the period name, so they
+  // never get pushed off screen by a room with many lights.
   _lookActions(room, period, own) {
     const r = esc(room.id);
     const p = esc(period);
     const dim = this._track === "dim";
+    const btn = (action, icon, label) =>
+      `<button class="iconbtn" data-action="${action}" data-room="${r}" data-period="${p}" title="${esc(label)}" aria-label="${esc(label)} (${p})"><ha-icon icon="${icon}"></ha-icon></button>`;
     const save = this._admin
-      ? `<button class="btn tiny" data-action="look-scene-now" data-room="${r}" data-period="${p}" title="Save the lights as they are now as a Home Assistant scene, and use it for this look">Save as now</button>`
-      : `<button class="btn tiny" data-action="look-current" data-room="${r}" data-period="${p}" title="Save the lights as they are now as this look">Save as now</button>`;
-    return `<div class="actionrow">
+      ? btn("look-scene-now", "mdi:content-save-outline", "Save as now: save the lights as they are now as a Home Assistant scene, and use it for this look")
+      : btn("look-current", "mdi:content-save-outline", "Save as now: save the lights as they are now as this look");
+    return `<div class="iconpill">
       ${save}
-      <button class="btn tiny" data-action="look-pick-scene" data-room="${r}" data-period="${p}" title="Use a scene you already have">Pick a scene</button>
-      <button class="btn tiny" data-action="look-edit" data-room="${r}" data-period="${p}" title="Set each light by hand">Edit</button>
-      <button class="btn tiny" data-action="look-nothing" data-room="${r}" data-period="${p}" title="Keep the room dark in this period">Keep dark</button>
-      ${own ? `<button class="btn tiny" data-action="look-borrow" data-room="${r}" data-period="${p}" title="${dim ? "Remove this Dark Day look: the period uses its Normal one" : "Remove this period's own look: it uses the previous period's"}">${dim ? "Use Normal" : "Use previous"}</button>` : ""}
+      ${btn("look-pick-scene", "mdi:palette-outline", "Pick a scene you already have")}
+      ${btn("look-edit", "mdi:pencil-outline", "Edit: set each light by hand")}
+      ${btn("look-nothing", "mdi:lightbulb-off-outline", "Keep dark in this period")}
+      ${own ? btn("look-borrow", "mdi:undo-variant", dim ? "Use Normal: remove this Dark Day look, the period uses its Normal one" : "Use previous: remove this period's own look, it uses the previous period's") : ""}
     </div>`;
   }
 
@@ -1932,6 +1936,11 @@ const STYLES = `
   .openrow:hover td, .openrow:focus-visible td { background: var(--secondary-background-color); }
   .timer { border-top:1px solid var(--divider-color); padding:8px 0; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
   .timer > div { flex-basis:100%; }
+  th.periodcell { white-space:nowrap; vertical-align:top; }
+  .iconpill { display:inline-flex; gap:2px; margin-top:6px; padding:2px; border:1px solid var(--divider-color); border-radius:16px; background: var(--secondary-background-color); }
+  .iconbtn { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; padding:0; border:none; border-radius:50%; background:none; color: var(--secondary-text-color); cursor:pointer; }
+  .iconbtn:hover, .iconbtn:focus-visible { background: color-mix(in srgb, var(--primary-color) 15%, transparent); color: var(--primary-color); outline:none; }
+  .iconbtn ha-icon { --mdc-icon-size:18px; }
   .cond { border-top:1px solid var(--divider-color); padding:8px 0; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
   .cond > div { flex-basis:100%; }
   .cond input.ent { flex:1 1 220px; min-width:180px; }
