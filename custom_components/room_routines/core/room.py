@@ -66,8 +66,8 @@ it switches the lights on and off, as it always has. A room that also has
 the lights those looks name follow them while someone's there, the others stay
 with the routine, and when the room empties they fade back to the routine
 instead of off. Without such looks, motion in a running routine changes nothing.
-Someone's there uses its own looks when the room has any, otherwise the room's
-looks. A light changed by hand is held by *Hand* until the lights are switched
+A period without its own Someone's there look uses the room's look for that
+period (Someone's there looks don't borrow from earlier periods). A light changed by hand is held by *Hand* until the lights are switched
 off. ``layer()`` says which one is on top now.
 
 Signals (see ``signals``) sit above all of that: while one holds a light, the
@@ -181,8 +181,9 @@ class RoomConfig:
     @property
     def runs_ambient(self) -> bool:
         """Whether starting the routine runs Ambient (until stopped) rather than acting
-        like a visit: a room without sensors, or one with Someone's there looks."""
-        return not self.has_sensors or self.has_someone_looks
+        like a visit: a room without sensors, or one with Someone's there looks and a
+        timer or starter to run its routine."""
+        return not self.has_sensors or (self.has_someone_looks and bool(self.timers or self.starters))
 
     @property
     def base_layer(self) -> Layer:
@@ -340,19 +341,31 @@ class Room:
             return Layer.AMBIENT
         return self.config.base_layer
 
+    def _someone_source(self, period: str) -> LookSource | None:
+        """The period's own Someone's there look, if it has one (no borrowing)."""
+        if self.track != NORMAL and period in self.config.someone_dim_looks:
+            return LookSource(self.config.someone_dim_looks[period], period, self.track)
+        if period in self.config.someone_looks:
+            return LookSource(self.config.someone_looks[period], period, NORMAL)
+        return None
+
+    def _resolve(self, layer: Layer, period: str) -> LookSource:
+        if layer is Layer.SOMEONE and (own := self._someone_source(period)) is not None:
+            return own
+        return resolve(period, self.track, self.config.looks, self.config.dim_looks, self.schedule)
+
     def _boosting(self) -> bool:
         """Someone's there over a running routine: two looks at once."""
-        return self.ambient_on and self.someone_on and self.config.has_someone_looks
+        return self.ambient_on and self.someone_on and self._someone_source(self.period) is not None
 
     def source(self, layer: Layer | None = None) -> LookSource:
         layer = layer or self._top()
-        looks, dim = self._tables(layer)
         rule = self.rule
         if rule is not None and rule.action == LOOK:
             if rule.scene:
                 return LookSource(Look(scene=rule.scene), self.period, self.track)
-            return resolve(rule.period or self.period, self.track, looks, dim, self.schedule)
-        return resolve(self.period, self.track, looks, dim, self.schedule)
+            return self._resolve(layer, rule.period or self.period)
+        return self._resolve(layer, self.period)
 
     def _cap(self, look: Look, factor: float) -> tuple[Look, float]:
         """Keep every light at or below a "no brighter than" rule's level. A light
@@ -429,21 +442,28 @@ class Room:
         f = fraction(now, at.next_start, minutes)
         if f is None:
             return None
-        looks, dim = self._tables(layer)
         here = self._as_lights(self.source(layer))
-        there = self._as_lights(resolve(at.next_name, self.track, looks, dim, self.schedule))
+        there = self._as_lights(self._resolve(layer, at.next_name))
         if here is None or there is None:
             return None
         return f, at.next_name, blend(here, there, f)
 
-    def _layer_target(self, layer: Layer, now: datetime) -> tuple[Look, float, str]:
+    def _layer_target(self, layer: Layer, now: datetime, blending: bool = True) -> tuple[Look, float, str]:
         """One layer's look as it should be sent now, blending included."""
-        b = self.blending(now, layer)
+        b = self.blending(now, layer) if blending else None
         if b is not None:
             f, nxt, look = b
             return look, 1.0, f"{self.period} look, blending into {nxt} ({round(f * 100)} %)"
         look, factor = self._to_apply(self._look(layer), layer)
         return look, factor, self._look_name(layer, tail=False)
+
+    def _someone_lit(self) -> set[str] | None:
+        """The lights this period's Someone's there look lights (None: can't tell)."""
+        own = self._someone_source(self.period)
+        if own is None or own.look.nothing:
+            return set()
+        plain = self._plain(own.look, 1.0)
+        return set(plain.lit()) if plain is not None else None
 
     def _plain(self, look: Look, factor: float) -> Look | None:
         """A look as lights with its factor applied (a scene read), or None if unreadable."""
@@ -460,7 +480,7 @@ class Room:
         others stay with the routine."""
         if self._boosting():
             base, bf, bname = self._layer_target(Layer.AMBIENT, now)
-            top, tf, tname = self._layer_target(Layer.SOMEONE, now)
+            top, tf, tname = self._layer_target(Layer.SOMEONE, now, blending=False)  # the routine blends, not this
             if top.nothing:
                 look, factor = self._cap(base, bf)
                 return look, factor, f"{bname}{self._rule_tail()}"
@@ -541,16 +561,32 @@ class Room:
         ]
 
     def set_signals(
-        self, states: Mapping[str, str | None], current: Mapping[str, LightTarget], now: datetime
+        self,
+        states: Mapping[str, str | None],
+        current: Mapping[str, LightTarget],
+        now: datetime,
+        flash: bool = True,
     ) -> Decision:
         """The entities signals read changed: take, change or give back lights.
-        ``current`` is how the lights are now (what to go back to later)."""
+        ``current`` is how the lights are now (what to go back to later). An entity
+        that's unavailable or unknown changes nothing (a blip isn't the end of a
+        call). ``flash`` False for start-up: the signal isn't new."""
+        unsure = {s.when.entity for s in self.config.signals if states.get(s.when.entity) in (None, *("unavailable", "unknown"))}
         new = held_by(self.config.signals, states, self.config.lights)
-        if new == self.held:
-            return self._unchanged()
+        for light, signal in self.held.items():
+            if light not in new and signal.when.entity in unsure:
+                new[light] = signal
         old = self.held
+        # Lights remembered from before a restart that no signal holds any more.
+        stale = [
+            light for light in self.before
+            if light not in old and light not in new
+            and not any(light in s.lights and s.when.entity in unsure for s in self.config.signals)
+        ]
+        if new == self.held and not stale:
+            return self._unchanged()
         changed = [light for light in new if old.get(light) != new[light]]
-        released = [light for light in old if light not in new]
+        released = [light for light in old if light not in new] + stale
         for light in changed:
             if light not in old and light not in self.before:
                 self.before[light] = current.get(light, LightTarget(False))
@@ -558,17 +594,35 @@ class Room:
         self.held = new
         for light in released:
             self.before.pop(light, None)
-        actions = self._signal_actions(changed)
+        actions = self._signal_actions(changed, flash=flash)
         if back:
-            actions.append(ApplyLook(Look(back), signal=True))
+            effects = any(old[light].effect for light in released if light in old)
+            actions.append(ApplyLook(Look(back), signal=True, effect="off" if effects else None))
         parts = []
         started = {new[light].name for light in changed}
         if started:
             parts.append("signal: " + ", ".join(sorted(started)))
-        ended = {old[light].name for light in released}
+        ended = {old[light].name for light in released if light in old}
         if ended:
             parts.append("signal over: " + ", ".join(sorted(ended)))
         return self._decide("; ".join(parts), *actions)
+
+    def release_signals(self, now: datetime) -> Decision:
+        """Give every held light back (the room is being switched to log-only or off)."""
+        if not self.held:
+            return self._unchanged()
+        released = list(self.held)
+        back = self._fallback(released, now)
+        effects = any(self.held[light].effect for light in released)
+        self.held = {}
+        for light in released:
+            self.before.pop(light, None)
+        return self._decide("signals handed back", ApplyLook(Look(back), signal=True, effect="off" if effects else None))
+
+    def held_switched_off(self, light: str) -> None:
+        """Someone switched a signal's light off: it stays off when the signal ends."""
+        if light in self.held:
+            self.before[light] = LightTarget(False)
 
     def _fallback(self, lights: list[str], now: datetime) -> dict[str, LightTarget]:
         """Where released lights go: what the room is doing with them, else how
@@ -616,6 +670,8 @@ class Room:
         self.ambient.lights_changed(True, now)
 
     def _go_idle(self) -> None:
+        for light in self.held:
+            self.before[light] = LightTarget(False)  # the room went off under the signal
         self.state = State.IDLE
         self.ambient_on = False
         self.someone_on = False
@@ -724,8 +780,8 @@ class Room:
 
     def _boost(self, entity: str, now: datetime) -> Decision:
         """Someone arrives while the routine runs: brighten with Someone's there's looks."""
-        if not self.config.has_someone_looks:
-            return self._unchanged()  # nothing to brighten with: the routine carries on
+        if self._someone_source(self.period) is None:
+            return self._unchanged()  # nothing to brighten with in this period: the routine carries on
         refused = self.refusal()
         if refused:
             return self._decide(f"motion at {entity}, but {refused}")
@@ -763,7 +819,7 @@ class Room:
             ApplyLook(look, self._power_for(look), factor=factor),
         )
 
-    def start(self, now: datetime, why: str) -> Decision:
+    def start(self, now: datetime, why: str, visit: bool = False) -> Decision:
         """Start the routine (a timer, a button, the switch_on action): the current
         look, then following the day, whatever the lights were doing. In a room with
         sensors and no Someone's there looks it's a visit, as it always was: it
@@ -771,7 +827,7 @@ class Room:
         refused = self.refusal()
         if refused:
             return self._decide(f"{why}, but {refused}")
-        layer = Layer.AMBIENT if self.config.runs_ambient else Layer.SOMEONE
+        layer = Layer.AMBIENT if self.config.runs_ambient and not visit else Layer.SOMEONE
         if self._look(layer).nothing:
             if not self.has_any_look():
                 return self._decide(f"{why}, but {NO_LOOK}")
@@ -922,7 +978,7 @@ class Room:
         if self.adopt_at is not None and now >= self.adopt_at:
             self.adopt_at = None
             if self.state is State.MANUAL:
-                return self.start(now, "switched on by hand")
+                return self.start(now, "switched on by hand", visit=self.config.has_sensors)
         if self.state is not State.OWNED or self.deadline is None or now < self.deadline:
             return self._unchanged()
         if self.occupied():
@@ -934,10 +990,22 @@ class Room:
             self.someone_on = False
             self.deadline = None
             self._last_blend = None
+            lit = self._someone_lit()
             if self.paused:
                 return self._decide("empty: the routine carries on, lights left as changed by hand")
             look, factor, name = self._target(now)
-            return self._decide(f"empty: back to the {name}", ApplyLook(look, self._power_for(look), fade, factor))
+            switchable = self.config.switchable()
+            if look.nothing:
+                # The routine does nothing in this period: off with what Someone's there lit.
+                off = tuple(l for l in switchable if lit is None or l in lit)
+                return self._decide(f"empty: {name} is 'do nothing', so lights off", TurnOff(off, fade))
+            plain = self._plain(look, factor)
+            named = set(plain.lights) if plain is not None else set(switchable)
+            extra = tuple(l for l in switchable if lit and l in lit and l not in named)
+            actions: list[Action] = [ApplyLook(look, self._power_for(look), fade, factor)]
+            if extra:
+                actions.append(TurnOff(extra, fade))  # nothing below wants them: off
+            return self._decide(f"empty: back to the {name}", *actions)
         self._go_idle()
         self.ambient.lights_changed(False, now)
         return self._decide("empty for the timeout: lights off", TurnOff(self.config.switchable(), fade))

@@ -118,3 +118,46 @@ def test_signals_are_stored_and_read_back():
     assert signal_from(data) == SIGNALS[1]
     config = room_from({"name": "Office", "lights": [PLAY, IRIS], "triggers": [], "signals": [data]})
     assert config.signals == (SIGNALS[1],)
+
+
+def test_a_room_switched_off_during_a_call_stays_off_after_it():
+    room = make()
+    room.start(at(28, 10), "timer")
+    room.set_signals({CALL: "on"}, {IRIS: WHITE}, at(28, 10, 5))
+    room.stop(at(28, 23), "timer at 01:00")
+    d = room.set_signals({CALL: "off"}, {IRIS: PURPLE}, at(28, 23, 30))
+    assert looks_sent(d)[0].look == Look({IRIS: LightTarget(False)})
+
+
+def test_a_signal_light_switched_off_by_hand_stays_off_after():
+    room = make()
+    room.set_signals({CALL: "on"}, {IRIS: WHITE}, at(28, 10))
+    room.held_switched_off(IRIS)
+    d = room.set_signals({CALL: "off"}, {}, at(28, 11))
+    assert looks_sent(d)[0].look == Look({IRIS: LightTarget(False)})
+
+
+def test_a_blip_in_the_signal_entity_changes_nothing():
+    room = make()
+    room.set_signals({CALL: "on"}, {IRIS: WHITE}, at(28, 10))
+    d = room.set_signals({CALL: "unavailable"}, {IRIS: PURPLE}, at(28, 10, 1))
+    assert not d.actions and IRIS in room.held
+
+
+def test_start_up_doesnt_flash_and_a_call_that_ended_while_down_is_given_back():
+    room = make()
+    d = room.set_signals({CALL: "on"}, {IRIS: PURPLE}, at(28, 10), flash=False)
+    assert not looks_sent(d)[0].flash
+    after = make()
+    after.before = {IRIS: LightTarget(True, 20, 2700)}  # remembered from before the restart
+    d = after.set_signals({CALL: "off", MUTED: "off"}, {IRIS: PURPLE}, at(28, 11))
+    assert looks_sent(d)[0].look == Look({IRIS: LightTarget(True, 20, 2700)}) and not after.before
+
+
+def test_handing_signals_back_and_clearing_an_effect():
+    candle = (Signal("Candle", Condition(CALL), {IRIS: PURPLE}, effect="candle"),)
+    room = make(office(signals=candle))
+    room.set_signals({CALL: "on"}, {IRIS: WHITE}, at(28, 10))
+    d = room.release_signals(at(28, 10, 5))
+    (back,) = looks_sent(d)
+    assert back.effect == "off" and back.look == Look({IRIS: WHITE}) and not room.held

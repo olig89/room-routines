@@ -557,7 +557,7 @@ class RoomRoutinesPanel extends HTMLElement {
           cells = `<td colspan="${lights.length}" class="muted">${pct !== 100 ? `Uses ${src} at ${esc(pct)} %${note}` : `Uses ${src}`}</td>`;
         } else {
           const borrowed = this._borrowedFrom(order, T.looks, p);
-          if (!borrowed && someone) cells = `<td colspan="${lights.length}" class="muted">Not set: stays with the routine</td>`;
+          if (someone) cells = `<td colspan="${lights.length}" class="muted">Not set: the room's look</td>`;
           else cells = lights.map((l) => `<td class="muted">${borrowed ? `as ${esc(borrowed)}` : "—"}</td>`).join("");
         }
         return `<tr class="${now ? "nowrow" : ""}">
@@ -577,7 +577,7 @@ class RoomRoutinesPanel extends HTMLElement {
       ${Object.entries(TRACK_LABEL).map(([k, v]) => `<button class="subtab ${k === track ? "on" : ""}" data-action="look-track" data-track="${k}"><ha-icon icon="${TRACK_ICON[k]}"></ha-icon> ${v}s</button>`).join("")}
     </div>`;
     const someoneHelp = someone
-      ? `<p class="explain"><b>Brighter while someone's there.</b> While the room's routine runs (started by a timer, a starter, a button or by hand), motion moves the lights set here to these looks; lights left out stay with the routine. When the room is empty again they fade back to the routine instead of going off. When the routine isn't running, motion uses these looks too. ${room.runs_ambient ? "" : "Setting any of these also means starting the routine keeps it running until it's stopped, instead of acting like a visit that switches off when the room is empty."}</p>`
+      ? `<p class="explain"><b>Brighter while someone's there.</b> While the room's routine runs (started by a timer, a starter, a button or by hand), motion moves the lights set here to these looks; lights left out stay with the routine. When the room is empty again they fade back to the routine instead of going off. Each look covers only its own period: a period without one uses the room's look. When the routine isn't running, motion uses these looks too. ${room.runs_ambient ? "" : "In a room with sensors, the routine runs until it's stopped only once the room also has a timer or a starter; until then starting it is a visit that switches off when the room is empty."}</p>`
       : "";
     const trackHelp = someoneHelp + (dim
       ? `<p class="explain">These looks are used on Dark Days${d.house.tracks?.enabled ? ` (in ${esc((d.house.tracks.periods || []).join(", ") || "no periods")}, when the sun is down or the light is below ${esc(d.house.tracks.dark_below_pct)} % of a clear day)` : ", once Dark Days are switched on under Settings → Dark Days"}. ${(d.house.tracks?.brightness_pct ?? 100) !== 100 ? `A period without its own Dark Day look uses its Normal one at ${esc(d.house.tracks.brightness_pct)} % brightness (lights set to their last brightness stay as they are)` : "A period without its own Dark Day look uses its Normal one"}, so only set the ones that should differ.</p>`

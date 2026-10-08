@@ -286,7 +286,10 @@ BRIGHT = {"lights": {PLAY: {"on": True, "brightness_pct": 80, "color_temp_kelvin
 
 async def test_someone_there_brightens_the_routine_and_hands_back(hass, lights, freezer):
     hass.states.async_set(MOTION, "off")
-    await setup(hass, triggers=[MOTION], timeout_s=30, fade_out_s=15, someone_looks={"Morning": BRIGHT})
+    await setup(
+        hass, triggers=[MOTION], timeout_s=30, fade_out_s=15, someone_looks={"Day": BRIGHT},
+        timers=[{"at": "06:00", "action": "on", "days": "every_day"}],
+    )
     await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
     await hass.async_block_till_done()
     assert lights.of("turn_on")[-1]["brightness_pct"] == 40  # the routine's Focus look

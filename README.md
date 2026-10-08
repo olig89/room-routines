@@ -76,8 +76,10 @@ room can run in log-only mode first.
   a starter, a button, lights switched on by hand), motion moves the lights set
   there to those looks, the others stay with the routine, and when the room is
   empty they fade back to the routine instead of going off: a hallway that sits
-  very dim all evening and brightens as someone walks through. Without such
-  looks a motion room works as it always has.
+  very dim all evening and brightens as someone walks through. Each covers only
+  its own period (one without uses the room's look), and in a room with sensors
+  the routine runs until stopped once the room has a timer or starter. Without
+  such looks a motion room works as it always has.
 - **Signals** (optional, per room): some of the room's lights show something
   while an entity is in a state: in a call, the desk lamp purple; muted, green.
   Colour and brightness per light, optionally one of the light's own effects and

@@ -40,6 +40,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ATTR_ENTITY_ID,
     ATTR_SUPPORTED_FEATURES,
+    STATE_OFF,
     STATE_ON,
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
@@ -60,7 +61,7 @@ from homeassistant.util import dt as dt_util
 from .const import ANY_SIGNAL, DOMAIN, MODE_LIVE, MODE_LOG_ONLY, MODE_OFF, house_signal, room_signal
 from .core.fade import plan_fade
 from .core.layers import LAYER_IDS
-from .core.signals import held_by, targets_from
+from .core.signals import held_by, targets_from, targets_to
 from .core.habits import Change, Suggestion, change_from, change_to, suggest
 from .core.looks import OFF, LightTarget, Look, resolve, scaled
 from .core.matching import Command, OwnChangeMatcher
@@ -250,7 +251,9 @@ class RoomRunner:
         elif (kept := self.house.room_memory.get(self.room_id)) and kept.get("signal_before"):
             self.room.before.update(targets_from(kept["signal_before"]))
         if self.mode != MODE_OFF and self.config.signals:
-            self._run(self.room.set_signals(self._states(), capture(self.hass, self.config).lights, now))
+            self._run(self.room.set_signals(
+                self._states(), capture(self.hass, self.config).lights, now, flash=False
+            ))
         self._try_restore(now)
         self._persist()
         self._notify()
@@ -288,7 +291,13 @@ class RoomRunner:
         """Remember whether the routine is running, for the next restart."""
         if self._restore is not None:
             if self._restore_until is not None and dt_util.now() <= self._restore_until:
-                return  # still waiting to pick it up: keep what was remembered
+                # Still waiting to pick it up: keep what was remembered, with the
+                # signals' "before" as it is now.
+                kept = {k: v for k, v in self._restore.items() if k != "signal_before"}
+                if self.room is not None and self.room.before:
+                    kept["signal_before"] = targets_to(self.room.before)
+                self.house.remember(self.room_id, kept or None)
+                return
             self._restore = None
         memory = self.room.memory() if self.room is not None and self.mode == MODE_LIVE else None
         self.house.remember(self.room_id, memory)
@@ -302,6 +311,8 @@ class RoomRunner:
     def set_mode(self, mode: str) -> None:
         if mode == self.mode:
             return
+        if self.mode == MODE_LIVE and mode != MODE_LIVE and self.room is not None and self.room.held:
+            self._run(self.room.release_signals(dt_util.now()))  # don't leave a light in a signal's colour
         self.mode = mode
         self._build()
         if self.config.period_starts:
@@ -349,7 +360,12 @@ class RoomRunner:
         if entity not in self.config.switchable() or new is None:
             return
         if entity in self.room.held:
-            return  # a signal holds it: a change to it is the signal's (or shows over it)
+            # A signal holds it: a change to it is the signal's, or shows over it until
+            # the signal changes. Switched off by hand, it stays off afterwards.
+            if new.state == STATE_OFF:
+                self.room.held_switched_off(entity)
+                self._persist()
+            return
         if new.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return
         now = dt_util.now()
@@ -563,9 +579,10 @@ class RoomRunner:
             acting = True
             if self.mode != MODE_LIVE:
                 continue
-            if isinstance(action, (ApplyLook, TurnOff)):
+            if isinstance(action, (ApplyLook, TurnOff)) and not (isinstance(action, ApplyLook) and action.signal):
                 # A new instruction replaces any fade still under way (someone
-                # walking back in during a fade-out brings the lights back).
+                # walking back in during a fade-out brings the lights back). A
+                # signal's own command doesn't: the other lights carry on fading.
                 self._cancel_fades()
             if isinstance(action, ApplyLook):
                 self.hass.async_create_task(self._apply(action))
@@ -655,11 +672,15 @@ class RoomRunner:
             data["color_temp_kelvin"] = target.color_temp_kelvin
         if target.rgb is not None:
             data["rgb_color"] = list(target.rgb)
-        if flash:
-            data["flash"] = "short"
-        if effect and effect in (self.hass.states.get(light).attributes.get("effect_list") or []):
+        state = self.hass.states.get(light)
+        if effect and state is not None and effect in (state.attributes.get("effect_list") or []):
             data["effect"] = effect
         await self.hass.services.async_call("light", "turn_on", data, context=ctx)
+        if flash:
+            # After the colour, as its own command: some lights drop a colour sent with a flash.
+            await self.hass.services.async_call(
+                "light", "turn_on", {ATTR_ENTITY_ID: light, "flash": "short"}, context=ctx
+            )
 
     def _supports_transition(self, light: str) -> bool:
         state = self.hass.states.get(light)
@@ -753,6 +774,8 @@ class RoomRunner:
             @callback
             def _step(_now, sends=sends) -> None:
                 for light, target in sends.items():
+                    if self.room is not None and light in self.room.held:
+                        continue  # a signal took it during the fade
                     self.hass.async_create_task(self._send(light, target))
 
             self._fades.append(async_call_later(self.hass, offset.total_seconds(), _step))

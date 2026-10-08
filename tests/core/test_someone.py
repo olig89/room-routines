@@ -1,12 +1,13 @@
 """Someone's there over a running routine (Ambient): brighter while someone's
 there, back to the routine when the room empties."""
 
-from datetime import timedelta
+from datetime import time, timedelta
 
 from custom_components.room_routines.core.layers import Layer
 from custom_components.room_routines.core.looks import LightTarget, Look
 from custom_components.room_routines.core.periods import default_schedule
 from custom_components.room_routines.core.room import ApplyLook, Room, RoomConfig, State, TurnOff, WakeAt
+from custom_components.room_routines.core.timers import Timer
 
 from .conftest import at
 
@@ -21,7 +22,8 @@ def hall(**over) -> RoomConfig:
         name="Hall", lights=(CEILING,), triggers=(MOTION,), threshold_lux=None,
         timeout=timedelta(seconds=30), fade_out=timedelta(seconds=15),
         looks={"Morning": Look({CEILING: DIM})},
-        someone_looks={"Morning": Look({CEILING: BRIGHT})},
+        someone_looks={"Evening": Look({CEILING: BRIGHT})},
+        timers=(Timer(time(18, 0)),),  # the routine has a way to start
     )
     base.update(over)
     return RoomConfig(**base)
@@ -64,7 +66,7 @@ def test_lights_left_out_of_someones_look_stay_with_the_routine():
     room = make(hall(
         lights=(CEILING, LAMP),
         looks={"Morning": Look({CEILING: DIM, LAMP: DIM})},
-        someone_looks={"Morning": Look({CEILING: BRIGHT})},
+        someone_looks={"Evening": Look({CEILING: BRIGHT})},
     ))
     room.start(at(28, 18), "timer")
     d = room.sensor(MOTION, True, at(28, 18, 30))
@@ -145,3 +147,44 @@ def test_memory_from_before_layers_is_read_by_whether_the_room_has_sensors():
     office = Room(hall(triggers=()), default_schedule(), "Evening", True, at(28, 19))
     office.restore(at(28, 18), False, at(28, 19))
     assert office.ambient_on and not office.someone_on
+
+
+def test_lights_only_someone_lit_go_off_when_the_room_empties():
+    # The routine lights the lamp; Someone's there lights the lamp and the ceiling.
+    room = make(hall(
+        lights=(CEILING, LAMP),
+        looks={"Morning": Look({LAMP: DIM})},
+        someone_looks={"Evening": Look({CEILING: BRIGHT, LAMP: BRIGHT})},
+    ))
+    room.start(at(28, 18), "timer")
+    room.sensor(MOTION, True, at(28, 18, 30))
+    room.sensor(MOTION, False, at(28, 18, 31))
+    d = room.tick(at(28, 18, 32))
+    assert applied(d).look == Look({LAMP: DIM})
+    (off,) = [a for a in d.actions if isinstance(a, TurnOff)]
+    assert off.lights == (CEILING,)
+
+
+def test_someone_over_a_do_nothing_period_switches_off_when_empty():
+    room = make(hall(looks={"Morning": Look({CEILING: DIM}), "Evening": Look(nothing=True)}))
+    room.ambient_on = True  # the routine was started earlier, before Evening's "do nothing"
+    room.state = State.OWNED
+    d = room.sensor(MOTION, True, at(28, 18, 30))
+    assert applied(d).look == Look({CEILING: BRIGHT})
+    room.sensor(MOTION, False, at(28, 18, 31))
+    d = room.tick(at(28, 18, 32))
+    (off,) = [a for a in d.actions if isinstance(a, TurnOff)]
+    assert off.lights == (CEILING,)
+
+
+def test_a_someone_look_only_covers_its_own_period():
+    room = make(hall(someone_looks={"Day": Look({CEILING: BRIGHT})}, timers=()))
+    d = room.sensor(MOTION, True, at(28, 18))  # Evening has none: the room's look
+    assert applied(d).look == Look({CEILING: DIM})
+
+
+def test_a_hand_switch_on_taken_over_in_a_motion_room_is_still_a_visit():
+    room = make(hall(on_by_hand="routine"))
+    room.lights(True, False, at(28, 18))
+    room.tick(at(28, 18, 0, 4))
+    assert room.someone_on and not room.ambient_on
