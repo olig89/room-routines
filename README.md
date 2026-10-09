@@ -86,18 +86,19 @@ room can run in log-only mode first.
   its own period (one without uses the room's look), and in a room with sensors
   the routine runs until stopped once the room has a timer or starter. Without
   such looks a motion room works as it always has.
-- **Signals** (optional, per room): some of the room's lights show something
+- **Inform** (optional, per room): some of the room's lights tell you something
   while an entity is in a state: in a call, the desk lamp purple; muted, green.
   Colour and brightness per light, optionally one of the light's own effects and
-  a flash when it starts. While a signal holds a light nothing else in the room
+  a flash when it starts. While one holds a light nothing else in the room
   touches it (a scene look is sent without it), it shows even with the room off,
   and when it ends the light goes back to what the room is doing, or to how it
-  was before. The first signal in the list wins a light two signals want.
+  was before. If two want the same light, the first in the list wins.
 - **Fade-out:** lights with a native transition fade by themselves; others (KNX)
   get small brightness steps, and come back at their old level next time.
 - **Per room:** a *Status* sensor (idle / lights on by motion / switched on by
   hand, with the reason, and a `layer` attribute saying what has the lights:
-  `ambient` (the routine), `someone` (motion), `hand` (a change made by hand) or
+  `inform` (an Inform holds a light), `ambient` (the routine), `someone` (motion),
+  `hand` (a change made by hand) or
   empty when they're off), a *Mode* select (off / log only / live; new rooms start
   in log only) and a *Light level* sensor (the held ambient value).
 - **Dark Days:** a day counts as dark by comparing the light now with a

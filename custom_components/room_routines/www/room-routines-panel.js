@@ -37,7 +37,7 @@ const RULE_ACTIONS = { nothing: "Do nothing", look: "Use another look", cap: "No
 const ERRORS = {
   no_name: "Give the room a name.",
   invalid_room: "A room needs at least one light, a sensor can't both switch the lights on and only keep them on, and every timer needs a time.",
-  invalid_signals: "Every signal needs an entity and a state, and at least one of the room's lights.",
+  invalid_signals: "Each Inform needs an entity and a state, and at least one of the room's lights.",
   invalid_rules: "Every condition and rule needs an entity and a state; a rule using another look needs a scene or a period, and a brightness limit a level from 1 to 100 %.",
   invalid_room_times: "The room's own start times must give every period a different time.",
   invalid_periods: "Every period needs its own name and a start time no other period uses on the same days.",
@@ -435,7 +435,7 @@ class RoomRoutinesPanel extends HTMLElement {
     const held = Object.entries(room.hand || {});
     if (held.length && !room.paused) bits.push(`changed by hand: ${held.map(([l, u]) => esc(this._name(l)) + (u ? ` until ${esc(hhmm(u))}` : "")).join(", ")}`);
     else if (held.length && held.some(([, u]) => u)) bits.push(`back to the routine at ${esc(hhmm(held.map(([, u]) => u).filter(Boolean).sort()[0]))}`);
-    for (const sig of room.signals_now || []) bits.push(`<span class="signal">signal: ${esc(sig.name)} on ${sig.lights.map((l) => esc(this._name(l))).join(", ")}</span>`);
+    for (const sig of room.signals_now || []) bits.push(`<span class="signal">inform: ${esc(sig.name)} on ${sig.lights.map((l) => esc(this._name(l))).join(", ")}</span>`);
     if (room.unmet) bits.push(`waiting: only when ${esc(room.unmet)}`);
     if (room.blending) bits.push(`blending into ${esc(room.blending.into)} (${Math.round(room.blending.fraction * 100)} %)`);
     if (room.mode === "log_only") bits.push(`<span class="muted">(log only: switching nothing)</span>`);
@@ -449,7 +449,7 @@ class RoomRoutinesPanel extends HTMLElement {
   _luxLine(room) {
     if (!room.has_sensors) return "";
     const t = room.settings.threshold_lux;
-    if (!room.settings.lux_sensor) return t == null ? "" : "No light-level sensor: switches on at any light level";
+    if (!(room.settings.lux_sensors || []).length) return t == null ? "" : "No light-level sensor: switches on at any light level";
     if (room.ambient == null) return `Light level unknown, so it counts as dark${t != null ? ` (switches on below ${t} lx)` : ""}`;
     if (t == null) return `${Math.round(room.ambient)} lx · switches on at any light level`;
     return room.dark_enough
@@ -940,10 +940,11 @@ class RoomRoutinesPanel extends HTMLElement {
     if (room) {
       this._roomDraft = { id: room.id, name: room.name, area_id: room.area_id, mode: room.mode, ...JSON.parse(JSON.stringify(room.settings)) };
     } else {
-      this._roomDraft = { id: null, name: "", area_id: null, lights: [], triggers: [], holds: [], lux_sensor: null, self_fading: [], on_by_hand: "leave", hand_hold: "until_off", hand_minutes: 30, ends: [], blends: {}, period_starts: {}, timers: [], starters: [], only_when: [], rules: [], signals: [], ...ROOM_DEFAULTS };
+      this._roomDraft = { id: null, name: "", area_id: null, lights: [], triggers: [], holds: [], lux_sensors: [], self_fading: [], on_by_hand: "leave", hand_hold: "until_off", hand_minutes: 30, ends: [], blends: {}, period_starts: {}, timers: [], starters: [], only_when: [], rules: [], signals: [], ...ROOM_DEFAULTS };
     }
     const r = this._roomDraft;
     r.on_by_hand = r.on_by_hand || "leave";
+    r.lux_sensors = [...(r.lux_sensors || (r.lux_sensor ? [r.lux_sensor] : []))];
     r.hand_hold = r.hand_hold || "until_off";
     r.hand_minutes = r.hand_minutes || 30;
     r.ends = [...(r.ends || [])];
@@ -988,9 +989,7 @@ class RoomRoutinesPanel extends HTMLElement {
           <span class="help">For a sensor whose going off means everyone has left, such as a pantry or cupboard door closing: the lights go off straight away, without waiting for the other sensors, the timeout or the fade.</span><div>
           ${[...r.triggers, ...r.holds].map((e) => `<label class="inline"><input type="checkbox" data-ends="${esc(e)}" ${r.ends.includes(e) ? "checked" : ""}> ${esc(this._name(e))}</label>`).join("")}
         </div></fieldset>` : ""}
-        <label>Light-level sensor <select data-room-field="lux_sensor"><option value="">None</option>
-          ${luxOptions.map((e) => `<option value="${esc(e)}" ${e === r.lux_sensor ? "selected" : ""}>${esc(this._name(e))}${r.area_id && this._areaOf(e) === r.area_id ? " (in this area)" : ""}</option>`).join("")}
-        </select><span class="help">Optional. Only read while the room's lights are off.</span></label>
+        ${this._picker("lux_sensors", "Light-level sensors", "sensor", "Optional. Only read while the room's lights are off. With more than one (each end of a staircase), the room counts as dark when any of them is.")}
         <div class="twocol">
           ${num("threshold_lux", "Switch on below", "lx", "Leave empty to switch on at any light level.", 100000)}
           ${num("timeout_s", "Go dark after the room is empty for", "s", "", 7200)}
@@ -1183,11 +1182,11 @@ class RoomRoutinesPanel extends HTMLElement {
         <button class="btn tiny danger" data-action="signal-remove" data-row="${i}">Remove</button>
       </div>`;
     }).join("");
-    return `<fieldset><legend>Signals</legend>
+    return `<fieldset><legend>Inform</legend>
       ${this._entityOptions()}
       ${rows || `<div class="meta">None.</div>`}
-      <div class="row"><button class="btn small" data-action="signal-add">Add a signal</button></div>
-      <span class="help">Some of the room's lights show something while it's true: in a call, the desk lamp purple; muted, green. While a signal holds a light, nothing else in the room touches it. It shows even when the room is off, and when it ends the light goes back to what the room is doing, or to how it was before. The first signal in the list wins a light two signals want. A light effect only works if the light offers one by that name.</span>
+      <div class="row"><button class="btn small" data-action="signal-add">Add one</button></div>
+      <span class="help">Some of the room's lights tell you something while it's true: in a call, the desk lamp purple; muted, green. While one holds a light, nothing else in the room touches it. It shows even when the room is off, and when it ends the light goes back to what the room is doing, or to how it was before. If two want the same light, the first in the list wins. A light effect only works if the light offers one by that name.</span>
     </fieldset>`;
   }
 
@@ -1195,7 +1194,7 @@ class RoomRoutinesPanel extends HTMLElement {
     return signals
       .filter((x) => x.when?.entity && Object.keys(x.lights || {}).length)
       .map((x) => {
-        const out = { name: (x.name || "").trim() || "Signal", when: { entity: x.when.entity.trim(), state: (x.when.state || "on").trim() }, lights: x.lights };
+        const out = { name: (x.name || "").trim() || "Inform", when: { entity: x.when.entity.trim(), state: (x.when.state || "on").trim() }, lights: x.lights };
         if (x.when.negate) out.when.negate = true;
         if (x.flash) out.flash = true;
         if ((x.effect || "").trim()) out.effect = x.effect.trim();
@@ -1937,7 +1936,7 @@ class RoomRoutinesPanel extends HTMLElement {
           lights: r.lights,
           triggers: r.triggers,
           holds: r.holds,
-          lux_sensor: r.lux_sensor || null,
+          lux_sensors: r.lux_sensors,
           threshold_lux: r.threshold_lux ?? null,
           timeout_s: r.timeout_s ?? ROOM_DEFAULTS.timeout_s,
           fade_out_s: r.fade_out_s ?? ROOM_DEFAULTS.fade_out_s,

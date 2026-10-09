@@ -438,3 +438,24 @@ async def test_period_select_knows_the_next_change(hass, lights, freezer):
     state = hass.states.get(PERIOD)
     assert state.state == "Overnight"
     assert state.attributes["next_change"] == "2026-09-29T05:30:00+03:00"
+
+
+async def test_any_dark_light_sensor_is_dark_enough(hass, lights):
+    """Two light sensors (each end of a staircase): dark at either end lights the room."""
+    other = "sensor.landing_lux"
+    hass.states.async_set(other, "400")
+    await setup(hass, lux_sensor=None, lux_sensors=[other, LUX])
+    hass.states.async_set(LUX, "8")  # this end is dark
+    await hass.async_block_till_done()
+    await motion(hass, True)
+    assert lights.of("turn_on")[-1]["entity_id"] == CEILING
+
+
+async def test_both_light_sensors_bright_stays_off(hass, lights):
+    other = "sensor.landing_lux"
+    hass.states.async_set(other, "400")
+    await setup(hass, lux_sensor=None, lux_sensors=[other, LUX])
+    hass.states.async_set(LUX, "300")
+    await hass.async_block_till_done()
+    await motion(hass, True)
+    assert not lights.of("turn_on")

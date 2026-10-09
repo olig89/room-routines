@@ -57,13 +57,20 @@ def clean_room(user_input: Mapping[str, Any], previous: Mapping[str, Any] | None
         lights=list(user_input.get("lights") or []),
         triggers=list(user_input.get("triggers") or []),
         holds=list(user_input.get("holds") or []),
-        lux_sensor=user_input.get("lux_sensor") or None,
+        lux_sensor=None,
         threshold_lux=user_input.get("threshold_lux"),
         timeout_s=int(user_input["timeout_s"]),
         fade_out_s=int(user_input["fade_out_s"]),
         cooldown_s=int(user_input["cooldown_s"]),
         drift_s=int(user_input["drift_s"]),
     )
+    # Light-level sensors: a list now (dark when any is); the first is also kept as
+    # lux_sensor for older readers.
+    lux_sensors = [str(s) for s in user_input.get("lux_sensors") or [] if s]
+    if not lux_sensors and user_input.get("lux_sensor"):
+        lux_sensors = [str(user_input["lux_sensor"])]
+    room["lux_sensors"] = list(dict.fromkeys(lux_sensors))
+    room["lux_sensor"] = room["lux_sensors"][0] if room["lux_sensors"] else None
     # Only the room's own lights can be marked as fading by themselves.
     room["self_fading"] = [light for light in user_input.get("self_fading") or [] if light in room["lights"]]
     # Time-based routines (all optional: a room with none of them is a motion room).

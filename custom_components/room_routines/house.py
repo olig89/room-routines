@@ -125,6 +125,8 @@ class RoomSetup:
     # fade time): they get plain commands, never steps.
     self_fading: frozenset[str] = frozenset()
     start_mode: str = MODE_LOG_ONLY  # a new room's mode until its select remembers one
+    # Every light-level sensor (the room is dark when any of them is); lux_sensor is the first.
+    lux_sensors: tuple[str, ...] = ()
 
 
 class RoomRunner:
@@ -134,7 +136,8 @@ class RoomRunner:
         self.room_id = setup.room_id
         self.config = setup.config
         self.area_id = setup.area_id
-        self.lux_sensor = setup.lux_sensor
+        self.lux_sensors = setup.lux_sensors or ((setup.lux_sensor,) if setup.lux_sensor else ())
+        self.lux_sensor = self.lux_sensors[0] if self.lux_sensors else None
         self.self_fading = setup.self_fading
         self.start_mode = setup.start_mode
         self.mode = setup.start_mode  # the mode select restores the real value on start-up
@@ -194,8 +197,8 @@ class RoomRunner:
         if watched:
             self._unsubs.append(async_track_state_change_event(self.hass, watched, self._on_context))
         self._unsubs.append(async_track_state_change_event(self.hass, list(self.config.lights), self._on_light))
-        if self.lux_sensor:
-            self._unsubs.append(async_track_state_change_event(self.hass, [self.lux_sensor], self._on_lux))
+        if self.lux_sensors:
+            self._unsubs.append(async_track_state_change_event(self.hass, list(self.lux_sensors), self._on_lux))
 
     @callback
     def stop(self) -> None:
@@ -265,7 +268,7 @@ class RoomRunner:
                 self.room.unheard.add(sensor)
         rule, rule_text, unmet_text = self._context(self._states())
         self.room.rule, self.room.rule_text, self.room.unmet_text = rule, rule_text, unmet_text
-        self._offer_lux(self.hass.states.get(self.lux_sensor) if self.lux_sensor else None, now)
+        self._offer_lux(now)
         if self._restore and self._restore.get("signal_before"):
             self.room.before.update(targets_from(self._restore["signal_before"]))
         elif (kept := self.house.room_memory.get(self.room_id)) and kept.get("signal_before"):
@@ -412,17 +415,23 @@ class RoomRunner:
 
     @callback
     def _on_lux(self, event: Event[EventStateChangedData]) -> None:
-        self._offer_lux(event.data["new_state"], dt_util.now())
+        self._offer_lux(dt_util.now())
         self._notify()
 
-    def _offer_lux(self, state, now: datetime) -> None:
-        if self.room is None or state is None:
+    def _offer_lux(self, now: datetime) -> None:
+        """The darkest reading of the room's light sensors: dark enough anywhere
+        (one end of a staircase) is dark enough for the room."""
+        if self.room is None:
             return
-        try:
-            value = float(state.state)
-        except ValueError:
-            return
-        self.room.lux(value, now)
+        values = []
+        for sensor in self.lux_sensors:
+            state = self.hass.states.get(sensor)
+            try:
+                values.append(float(state.state))
+            except (AttributeError, TypeError, ValueError):
+                continue  # missing or unavailable: the others decide
+        if values:
+            self.room.lux(min(values), now)
 
     # -- what else the room listens to --
 
@@ -947,6 +956,7 @@ def rooms_from(options: Mapping[str, Any]) -> dict[str, RoomSetup]:
             room_id, room_from(data), data.get("area_id"), data.get("lux_sensor"),
             frozenset(data.get("self_fading") or ()),
             data.get("start_mode") if data.get("start_mode") in (MODE_OFF, MODE_LOG_ONLY, MODE_LIVE) else MODE_LOG_ONLY,
+            tuple(data.get("lux_sensors") or ()),
         )
     return rooms
 

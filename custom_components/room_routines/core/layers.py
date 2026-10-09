@@ -5,7 +5,7 @@ most important layer that wants a light decides it. When that layer lets go,
 the light falls to the next one down, at whatever that layer is doing then
 (part-way through a blend, say), and to off when nothing wants it.
 
-1. **Signal**: chosen lights show something while it's true (in a call: the
+1. **Inform**: chosen lights show something while it's true (in a call: the
    desk lamp purple). Only the lights it names.
 2. **Hand**: the lights someone changed. How long a change holds is the room's
    choice.
@@ -36,13 +36,13 @@ class Layer(IntEnum):
 
 
 LAYER_IDS = {
-    Layer.SIGNAL: "signal",
+    Layer.SIGNAL: "inform",
     Layer.HAND: "hand",
     Layer.SOMEONE: "someone",
     Layer.AMBIENT: "ambient",
 }
 LAYER_LABELS = {
-    Layer.SIGNAL: "Signal",
+    Layer.SIGNAL: "Inform",
     Layer.HAND: "Hand",
     Layer.SOMEONE: "Someone's there",
     Layer.AMBIENT: "Ambient",

@@ -49,4 +49,5 @@ def room_suggestions(hass: HomeAssistant, area_id: str | None) -> dict[str, list
         out["triggers"] = sensors
     if lux:
         out["lux_sensor"] = lux[0]
+        out["lux_sensors"] = [lux[0]]
     return out

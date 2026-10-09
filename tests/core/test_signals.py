@@ -43,7 +43,7 @@ def test_a_call_takes_the_iris_and_the_routine_leaves_it_alone():
     d = room.set_signals({CALL: "on"}, {IRIS: WHITE}, at(28, 10, 5))
     (sent,) = looks_sent(d)
     assert sent.signal and sent.flash and sent.look == Look({IRIS: PURPLE})
-    assert d.reason == "signal: In a call"
+    assert d.reason == "inform: In a call"
     d = room.period_changed("Evening", at(28, 17))  # the routine moves on: not the Iris
     assert all(IRIS not in a.look.lights for a in looks_sent(d))
     assert any(PLAY in a.look.lights for a in looks_sent(d))
@@ -64,7 +64,7 @@ def test_after_the_call_the_iris_rejoins_the_routine_where_it_has_got_to():
     room.set_signals({CALL: "on"}, {IRIS: WHITE}, at(28, 10, 5))
     d = room.set_signals({CALL: "off"}, {IRIS: PURPLE}, at(28, 11))
     (back,) = looks_sent(d)
-    assert back.look == Look({IRIS: WHITE}) and d.reason == "signal over: In a call"
+    assert back.look == Look({IRIS: WHITE}) and d.reason == "inform over: In a call"
     assert not room.held and not room.before
 
 

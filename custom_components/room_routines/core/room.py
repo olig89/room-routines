@@ -687,10 +687,10 @@ class Room:
         parts = []
         started = {new[light].name for light in changed}
         if started:
-            parts.append("signal: " + ", ".join(sorted(started)))
+            parts.append("inform: " + ", ".join(sorted(started)))
         ended = {old[light].name for light in released if light in old}
         if ended:
-            parts.append("signal over: " + ", ".join(sorted(ended)))
+            parts.append("inform over: " + ", ".join(sorted(ended)))
         return self._decide("; ".join(parts), *actions)
 
     def release_signals(self, now: datetime) -> Decision:
@@ -703,7 +703,7 @@ class Room:
         self.held = {}
         for light in released:
             self.before.pop(light, None)
-        return self._decide("signals handed back", ApplyLook(Look(back), signal=True, effect="off" if effects else None))
+        return self._decide("inform lights handed back", ApplyLook(Look(back), signal=True, effect="off" if effects else None))
 
     def held_switched_off(self, light: str) -> None:
         """Someone switched a signal's light off: it stays off when the signal ends."""
