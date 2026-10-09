@@ -49,7 +49,7 @@ from .core.serial import (
     schedule_from,
     schedule_to,
 )
-from .settings import SettingsError, clean_room, set_periods
+from .settings import SettingsError, clean_room, remove_room, set_periods
 from .suggest import room_suggestions
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -222,8 +222,10 @@ class RoomRoutinesOptionsFlow(OptionsFlow):
 
     async def async_step_remove_room(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
-            options = self._options()
-            options[CONF_ROOMS].pop(user_input[ROOM], None)
+            try:
+                options = remove_room(self._options(), user_input[ROOM])
+            except SettingsError:
+                options = self._options()  # already gone
             return self.async_create_entry(data=options)
         return self.async_show_form(
             step_id="remove_room", data_schema=vol.Schema({vol.Required(ROOM): self._room_choices()})

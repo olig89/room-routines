@@ -241,3 +241,91 @@ async def test_the_page_saves_and_previews(hass, lights, freezer, hass_ws_client
     event = (await ws.receive_json())["event"]
     assert event["house"]["lights_outs"][0]["text"] == "at 00:30"
     assert event["house"]["skip_entity"] == SKIP
+
+
+# ---- from the review ----
+
+
+async def test_a_rooms_group_members_and_lights_in_its_area_wait_with_it(hass, lights, freezer):
+    from homeassistant.helpers import area_registry as ar
+
+    area = ar.async_get(hass).async_create("Bath area")
+    lamp = er.async_get(hass).async_get_or_create("light", "test", "bath_lamp", suggested_object_id="bath_lamp")
+    er.async_get(hass).async_update_entity(lamp.entity_id, area_id=area.id)
+    opts = options()
+    opts["rooms"]["bath"]["lights"] = ["light.bath_group"]
+    opts["rooms"]["bath"]["looks"] = {"Overnight": {"lights": {"light.bath_group": {"on": True}}}}
+    opts["rooms"]["bath"]["area_id"] = area.id
+    for light in ("light.member_1", "light.member_2", lamp.entity_id, GARDEN):
+        hass.states.async_set(light, "on")
+    hass.states.async_set("light.bath_group", "on", {"entity_id": ["light.member_1", "light.member_2"]})
+    for sensor in (BATH_MOTION, BATH_PRESENCE, HALL_MOTION):
+        hass.states.async_set(sensor, "off")
+    hass.states.async_set(BATH_PRESENCE, "on")
+    for light in (OFFICE, HALL, RAW):
+        hass.states.async_set(light, "off")
+    entry = MockConfigEntry(domain=DOMAIN, title="Room Routines", data={}, options=opts)
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    await at(hass, freezer, ONE_AM)
+    [run] = house(hass).lights_out_runs
+    assert run["waiting"] == ["bath"]
+    assert run["loose"] == [GARDEN]  # not the group's members, not the lamp where someone is
+    assert turned_off(lights) == {GARDEN}
+
+
+async def test_a_log_only_run_leaves_the_skip_for_the_live_one(hass, lights, freezer):
+    entry = await setup(hass)
+    opts = dict(entry.options)
+    opts["lights_outs"] = [
+        {"id": "trial", "name": "Trial", "when": "time", "at": "00:55", "mode": "log_only"},
+        {"id": "real", "name": "Real", "when": "time", "at": "01:00", "mode": "live"},
+    ]
+    hass.config_entries.async_update_entry(entry, options=opts)
+    await hass.async_block_till_done()
+    await hass.services.async_call("switch", "turn_on", {"entity_id": SKIP}, blocking=True)
+    await evening_scene(hass)
+    await at(hass, freezer, "2026-09-27 21:55:00+00:00")
+    assert hass.states.get(SKIP).state == "on"
+    await at(hass, freezer, ONE_AM)
+    assert hass.states.get(SKIP).state == "off" and not turned_off(lights)
+    assert [r["name"] for r in house(hass).lights_out_runs] == ["Trial", "Real"]
+
+
+async def test_a_mode_change_carries_the_wait(hass, lights, freezer):
+    await setup(hass)
+    await evening_scene(hass)
+    await at(hass, freezer, ONE_AM)
+    hall = house(hass).rooms["hall"]
+    assert hall.lights_out_waiting() is not None  # off room: the plain path waits
+    await hass.services.async_call(
+        "select", "select_option", {"entity_id": "select.hall_routine_mode", "option": "live"}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert hall.room.lights_out_until is not None  # the live room took it over
+    hass.states.async_set(HALL_MOTION, "off")
+    await hass.async_block_till_done()
+    await at(hass, freezer, "2026-09-27 22:00:31+00:00")
+    assert HALL in turned_off(lights) and hall.room.state.value == "idle"
+    hass.states.async_set(HALL_MOTION, "on")  # motion works again afterwards
+    await hass.async_block_till_done()
+    assert lights.of("turn_on")[-1]["entity_id"] == HALL
+
+
+async def test_a_reload_keeps_the_wait(hass, lights, freezer):
+    entry = await setup(hass)
+    await evening_scene(hass)
+    await at(hass, freezer, ONE_AM)
+    assert set(house(hass).lights_out_waits) == {"bath", "hall"}
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert house(hass).rooms["bath"].lights_out_waiting() is not None
+    assert house(hass).rooms["hall"].lights_out_waiting() is not None
+    await at(hass, freezer, "2026-09-27 22:05:00+00:00")
+    hass.states.async_set(BATH_PRESENCE, "off")
+    hass.states.async_set(HALL_MOTION, "off")
+    await hass.async_block_till_done()
+    await at(hass, freezer, "2026-09-27 22:05:31+00:00")
+    assert {BATH, HALL} <= turned_off(lights)
+    assert house(hass).lights_out_waits == {}

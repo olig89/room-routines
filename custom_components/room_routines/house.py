@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -50,7 +50,7 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.core import CALLBACK_TYPE, Context, Event, EventStateChangedData, HomeAssistant, callback
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import (
@@ -194,6 +194,11 @@ class RoomRunner:
         self._plain_out: dict[str, Any] | None = None
         self._plain_out_unsubs: list[CALLBACK_TYPE] = []
         self._plain_out_timer: CALLBACK_TYPE | None = None
+        # A Lights out that was waiting before a restart, a reload or a mode change,
+        # until it can be picked up (the lights may report in late). {name, until}
+        self._resume_out: dict[str, Any] | None = None
+        self._resume_end: CALLBACK_TYPE | None = None
+        self._born = dt_util.now()
         # The room's own rules first, then the house's that cover it.
         self.rules: tuple[Rule, ...] = tuple(self.config.rules) + tuple(
             r for r in house.house_rules if r.applies_to(self.room_id)
@@ -229,6 +234,9 @@ class RoomRunner:
     def stop(self) -> None:
         self._cancel_timers()
         self._stop_plain_out()
+        if self._resume_end:
+            self._resume_end()
+            self._resume_end = None
         if self._grace_end:
             self._grace_end()
             self._grace_end = None
@@ -272,6 +280,11 @@ class RoomRunner:
         if not self._memory_read:
             # The first build (the mode select can get here before ``start``).
             self._memory_read = True
+            waited = self.house.lights_out_waits.get(self.room_id)
+            until = dt_util.parse_datetime(waited.get("until") or "") if isinstance(waited, dict) else None
+            if until is not None and until > now:
+                self._resume_out = {"name": str(waited.get("name") or "Lights out"), "until": until}
+                self._resume_end = async_call_later(self.hass, RESTORE_GRACE.total_seconds() + 1, self._resume_over)
             self._restore = self.house.room_memory.get(self.room_id)
             self._restore_until = now + RESTORE_GRACE if self._restore else None
             if self._restore:
@@ -304,6 +317,7 @@ class RoomRunner:
                 self._states(), capture(self.hass, self.config).lights, now, flash=False
             ))
         self._try_restore(now)
+        self._apply_resume()
         self._persist()
         self._notify()
 
@@ -340,6 +354,7 @@ class RoomRunner:
         self._run(self.room.restore(
             owned_at, bool(memory.get("paused")), now, memory.get("ambient"), memory.get("someone"), hand
         ))
+        self._apply_resume()
 
     def _persist(self) -> None:
         """Remember whether the routine is running, for the next restart."""
@@ -355,6 +370,7 @@ class RoomRunner:
             self._restore = None
         memory = self.room.memory() if self.room is not None and self.mode == MODE_LIVE else None
         self.house.remember(self.room_id, memory)
+        self.house.remember_wait(self.room_id, self._waiting_raw())
 
     def layer(self) -> str | None:
         """Which layer has the room's lights now, as an id (None: off)."""
@@ -367,8 +383,15 @@ class RoomRunner:
             return
         if self.mode == MODE_LIVE and mode != MODE_LIVE and self.room is not None and self.room.held:
             self._run(self.room.release_signals(dt_util.now()))  # don't leave a light in a signal's colour
+        carry = self._waiting_raw()  # a Lights out waiting here goes with the room into its new mode
+        self._stop_plain_out()
         self.mode = mode
+        if carry is not None:
+            self._resume_out = carry
         self._build()
+        if self._resume_out is carry:
+            self._resume_out = None  # nothing to carry it to (the lights are off)
+            self._persist()
         if self.config.period_starts:
             self._schedule_own_period()
 
@@ -399,7 +422,20 @@ class RoomRunner:
     @callback
     def _on_sensor(self, event: Event[EventStateChangedData]) -> None:
         if self._plain_out is not None:
-            self._plain_out_check()
+            old, new = event.data["old_state"], event.data["new_state"]
+            ended = (
+                event.data["entity_id"] in self.config.ends
+                and old is not None and old.state == STATE_ON
+                and (new is None or new.state != STATE_ON)
+            )
+            if ended:
+                name = self._plain_out["name"]
+                self._stop_plain_out()
+                self._lights_out_now(name, None)
+                self._persist()
+                self._notify()
+            else:
+                self._plain_out_check()
         if self.mode == MODE_OFF or self.room is None:
             return
         new = event.data["new_state"]
@@ -408,8 +444,14 @@ class RoomRunner:
 
     @callback
     def _on_light(self, event: Event[EventStateChangedData]) -> None:
+        if self._plain_out is not None and not self.lit_lights():
+            self._stop_plain_out()  # switched off some other way
+            self._persist()
+            self._notify()
         # Log-only runs on the room's own belief about its lights.
         if self.mode != MODE_LIVE or self.room is None:
+            if self._resume_out is not None:
+                self._apply_resume()
             return
         entity = event.data["entity_id"]
         new = event.data["new_state"]
@@ -435,6 +477,8 @@ class RoomRunner:
         if not own:
             self._before_fade.pop(entity, None)  # a person's level wins from now on
         self._run(self.room.lights(self._any_on(), own, now, entity))
+        if self._resume_out is not None and self._restore is None:
+            self._apply_resume()
         if self._restore is not None and on:
             # A light reporting in after the restart. KNX lights come back "off"
             # until their bus read answers, then "on", so any switch-on inside the
@@ -443,21 +487,31 @@ class RoomRunner:
 
     @callback
     def _on_lux(self, event: Event[EventStateChangedData]) -> None:
-        self._offer_lux(dt_util.now())
+        self._offer_lux(dt_util.now(), event.data["entity_id"])
         self._notify()
 
-    def _offer_lux(self, now: datetime) -> None:
+    def _offer_lux(self, now: datetime, fresh: str | None = None) -> None:
         """The darkest reading of the room's light sensors: dark enough anywhere
-        (one end of a staircase) is dark enough for the room."""
+        (one end of a staircase) is dark enough for the room. ``fresh`` just
+        reported; another sensor's last reading only counts while it's recent and
+        was made with the lights off and settled (not one taken while a lamp was on)."""
         if self.room is None:
             return
+        tracker = self.room.ambient
+        quiet = tracker.quiet_since()
         values = []
         for sensor in self.lux_sensors:
             state = self.hass.states.get(sensor)
+            if state is None:
+                continue
+            if fresh is not None and sensor != fresh:
+                reported = getattr(state, "last_reported", None) or state.last_updated
+                if now - reported > tracker.stale_after or (quiet is not None and reported < quiet):
+                    continue
             try:
                 values.append(float(state.state))
-            except (AttributeError, TypeError, ValueError):
-                continue  # missing or unavailable: the others decide
+            except (TypeError, ValueError):
+                continue  # unavailable: the others decide
         if values:
             self.room.lux(min(values), now)
 
@@ -630,7 +684,7 @@ class RoomRunner:
 
     def lit_lights(self) -> tuple[str, ...]:
         """The room's lights that are on now: never a power circuit, nor a light an Inform holds."""
-        held = set(self.room.held) if self.room is not None and self.mode != MODE_OFF else set()
+        held = set(self.room.held) if self.room is not None and self.mode == MODE_LIVE else set()
         out = []
         for light in self.config.switchable():
             state = self.hass.states.get(light)
@@ -643,14 +697,26 @@ class RoomRunner:
         (stealth mode: nobody)."""
         if self.house.stealth:
             return False
+        early = dt_util.now() - self._born < RESTORE_GRACE
         for sensor in (*self.config.triggers, *self.config.holds):
             state = self.hass.states.get(sensor)
             if state is not None and state.state == STATE_ON:
                 return True
+            if early and (state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN)):
+                return True  # not heard from since a restart: it may see someone
         return False
+
+    def lights_out_until(self, now: datetime) -> datetime:
+        """When a Lights out stops waiting here: the room's next period start."""
+        until = self.schedule.current(now).next_start
+        if until <= now + timedelta(seconds=1):
+            until = self.schedule.current(until + timedelta(seconds=1)).next_start
+        return until
 
     def lights_out_status(self, all_now: bool) -> str:
         """What a Lights out would do here now."""
+        if self.mode == MODE_LIVE and self.room is not None and self.room.state is State.IDLE:
+            return OUT_NOTHING
         if not self.lit_lights():
             return OUT_NOTHING
         if all_now or not self.someone_seen():
@@ -658,23 +724,64 @@ class RoomRunner:
         return OUT_WAITING
 
     @callback
-    def lights_out(self, name: str, until: datetime, all_now: bool) -> str:
+    def lights_out(self, name: str, all_now: bool) -> str:
         """A Lights out reaches the room. A live routine decides for itself; otherwise
-        the Lights out switches the lights (and keeps a log-only room's belief in step)."""
+        the Lights out switches the lights (and keeps a log-only room's belief in step,
+        without logging it twice)."""
         status = self.lights_out_status(all_now)
         now = dt_util.now()
+        until = self.lights_out_until(now)
+        self._resume_out = None  # a fresh Lights out replaces one carried over
         if self.mode == MODE_LIVE and self.room is not None:
             if self.room.state is State.IDLE:
                 return OUT_NOTHING
             self._run(self.room.lights_out(now, until, name, all_now))
             return OUT_WAITING if self.room.lights_out_until is not None else OUT_OFF
         if self.mode == MODE_LOG_ONLY and self.room is not None and self.room.state is not State.IDLE:
-            self._run(self.room.lights_out(now, until, name, all_now))
+            self._run(self.room.lights_out(now, until, name, all_now), log=False)
         if status == OUT_OFF:
             self._lights_out_now(name)
         elif status == OUT_WAITING:
             self._start_plain_out(name, until)
         return status
+
+    def _waiting_raw(self) -> dict[str, Any] | None:
+        """A Lights out waiting here (or carried over and not yet picked up): {name, until}."""
+        if self._plain_out is not None:
+            return {"name": self._plain_out["name"], "until": self._plain_out["until"]}
+        if self.room is not None and self.mode != MODE_OFF and (core := self.room.waiting_for()) is not None:
+            return core
+        return dict(self._resume_out) if self._resume_out is not None else None
+
+    @callback
+    def _resume_over(self, _now: datetime) -> None:
+        """The lights never came back after the restart: forget the wait."""
+        self._resume_end = None
+        if self._resume_out is not None:
+            self._resume_out = None
+            self._persist()
+
+    def _apply_resume(self) -> None:
+        """Pick up a Lights out that was waiting, once the room's lights are known to be on."""
+        pending = self._resume_out
+        if pending is None or self.room is None:
+            return
+        now = dt_util.now()
+        if now >= pending["until"]:
+            self._resume_out = None
+            return
+        if self.mode == MODE_LIVE:
+            if self.room.state is State.IDLE or self._restore is not None:
+                return  # lights not back yet, or the routine about to be picked up first
+            self._resume_out = None
+            self._run(self.room.wait_lights_out(now, pending["until"], pending["name"]))
+            return
+        if not self.lit_lights():
+            return
+        self._resume_out = None
+        if self.mode == MODE_LOG_ONLY and self.room.state is not State.IDLE:
+            self._run(self.room.wait_lights_out(now, pending["until"], pending["name"]), log=False)
+        self._start_plain_out(pending["name"], pending["until"], announce=False)
 
     def lights_out_waiting(self) -> dict[str, Any] | None:
         """A Lights out waiting for the room to empty, for the page."""
@@ -686,20 +793,30 @@ class RoomRunner:
             return None
         return {"name": out["name"], "until": out["until"].isoformat(), "at": out["at"].isoformat() if out["at"] else None}
 
-    def _lights_out_now(self, name: str) -> None:
+    def _lights_out_now(self, name: str, fade: timedelta | None | bool = True) -> None:
+        """Switch the room's lit lights off (``fade`` True: with the room's own fade)."""
         lights = self.lit_lights()
         if not lights:
             return
-        fade = self.config.fade_out if self.config.fade_out > timedelta(0) else None
-        self.hass.async_create_task(self._turn_off(lights, fade))
+        if fade is True:
+            fade = self.config.fade_out if self.config.fade_out > timedelta(0) else None
+        self.hass.async_create_task(self._turn_off(lights, fade or None))
         self.hass.async_create_task(self._log(f"{name}: lights off (the room's routine isn't live, so {name} switched them)"))
 
-    def _start_plain_out(self, name: str, until: datetime) -> None:
+    def _start_plain_out(self, name: str, until: datetime, announce: bool = True) -> None:
         self._stop_plain_out()
         self._plain_out = {"name": name, "until": until, "at": None}
         self._plain_out_unsubs.append(async_track_point_in_time(self.hass, self._plain_out_over, until))
-        self.hass.async_create_task(self._log(f"{name}: someone's here, lights off once the room is empty"))
+        if dt_util.now() - self._born < RESTORE_GRACE:
+            # Sensors not heard from yet count as someone there: look again once that ends.
+            self._plain_out_unsubs.append(async_call_later(
+                self.hass, (self._born + RESTORE_GRACE - dt_util.now()).total_seconds() + 1,
+                self._plain_out_recheck,
+            ))
+        if announce:
+            self.hass.async_create_task(self._log(f"{name}: someone's here, lights off once the room is empty"))
         self._plain_out_check()
+        self._persist()
         self._notify()
 
     def _stop_plain_out(self) -> None:
@@ -719,7 +836,12 @@ class RoomRunner:
         name = self._plain_out["name"]
         self._stop_plain_out()
         self.hass.async_create_task(self._log(f"{name} over: a new period, the lights are left as they are"))
+        self._persist()
         self._notify()
+
+    @callback
+    def _plain_out_recheck(self, _now: datetime) -> None:
+        self._plain_out_check()
 
     @callback
     def _plain_out_check(self) -> None:
@@ -728,6 +850,7 @@ class RoomRunner:
             return
         if not self.lit_lights():
             self._stop_plain_out()  # switched off some other way
+            self._persist()
             self._notify()
             return
         if self.someone_seen():
@@ -756,6 +879,7 @@ class RoomRunner:
         name = out["name"]
         self._stop_plain_out()
         self._lights_out_now(name)
+        self._persist()
         self._notify()
 
     # -- carrying out decisions --
@@ -783,7 +907,7 @@ class RoomRunner:
         self._wake = async_track_point_in_time(self.hass, self._tick, first)
 
     @callback
-    def _run(self, decision: Decision) -> None:
+    def _run(self, decision: Decision, log: bool = True) -> None:
         if decision.change is not None and self.mode == MODE_LIVE:
             self._note_change(decision.change)
         acting = False
@@ -805,7 +929,7 @@ class RoomRunner:
                 self.hass.async_create_task(self._turn_off(action.lights, action.transition))
             elif isinstance(action, MoveBlinds):
                 self.hass.async_create_task(self._move_blinds(action.positions))
-        if acting:
+        if acting and log:
             prefix = "" if self.mode == MODE_LIVE else "Log only: would act. "
             self.hass.async_create_task(self._log(prefix + decision.reason))
         self._arm(None)  # whatever the room now waits for (a hold by minutes after a restart)
@@ -1169,6 +1293,8 @@ class House:
         # Rooms whose routine was running, so a restart can carry on (see Room.memory).
         self._rooms_store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, f"{DOMAIN}.rooms")
         self.room_memory: dict[str, dict[str, Any]] = {}
+        # Lights outs waiting for rooms to empty, so a restart or reload carries on: {room: {name, until}}
+        self.lights_out_waits: dict[str, dict[str, Any]] = {}
         self._learned: dict[str, datetime] = {}  # sensor -> statistics read up to
         self.house_rules: tuple[Rule, ...] = tuple(
             rule_from(r) for r in self.options.get("house_rules") or ()
@@ -1198,6 +1324,9 @@ class House:
         rooms = await self._rooms_store.async_load() or {}
         self.room_memory = {
             k: v for k, v in (rooms.get("rooms") or {}).items() if isinstance(v, dict) and k in self.rooms
+        }
+        self.lights_out_waits = {
+            k: v for k, v in (rooms.get("lights_out") or {}).items() if isinstance(v, dict) and k in self.rooms
         }
         daylight = await self._daylight_store.async_load() or {}
         for sensor, row in (daylight.get("sensors") or {}).items():
@@ -1491,11 +1620,25 @@ class House:
             self.room_memory.pop(room_id, None)
         else:
             self.room_memory[room_id] = memory
-        self._rooms_store.async_delay_save(lambda: {"rooms": dict(self.room_memory)}, 2)
+        self._rooms_store.async_delay_save(self._rooms_data, 2)
+
+    def _rooms_data(self) -> dict[str, Any]:
+        return {"rooms": dict(self.room_memory), "lights_out": dict(self.lights_out_waits)}
+
+    def remember_wait(self, room_id: str, wait: Mapping[str, Any] | None) -> None:
+        """A Lights out waiting in a room, for the next restart or reload (None: none)."""
+        row = {"name": wait["name"], "until": wait["until"].isoformat()} if wait else None
+        if self.lights_out_waits.get(room_id) == row:
+            return
+        if row is None:
+            self.lights_out_waits.pop(room_id, None)
+        else:
+            self.lights_out_waits[room_id] = row
+        self._rooms_store.async_delay_save(self._rooms_data, 2)
 
     async def async_save_rooms(self) -> None:
         """Write the rooms' memory now (on unload: a delayed save might not happen first)."""
-        await self._rooms_store.async_save({"rooms": dict(self.room_memory)})
+        await self._rooms_store.async_save(self._rooms_data())
 
     def dismiss(self, key: str) -> None:
         self.dismissed[key] = (dt_util.now() + DISMISS_FOR).isoformat()
@@ -1594,23 +1737,61 @@ class House:
     def describe_lights_out(self, lights_out: LightsOut) -> str:
         return describe_lights_out(lights_out, self._name(lights_out.entity))
 
-    def loose_lights(self) -> list[str]:
-        """Lights that are on and in no room: never a group of other lights, a power
-        circuit, or a light hidden in Home Assistant (one behind another, such as a
-        template light's own)."""
+    def _members(self, light: str, registry) -> set[str]:
+        """The lights a group light stands for (a Home Assistant group helper or one
+        listing its members), else none."""
+        out: set[str] = set()
+        state = self.hass.states.get(light)
+        ids = state.attributes.get(ATTR_ENTITY_ID) if state is not None else None
+        if ids:
+            out.update(ids)
+        entry = registry.async_get(light)
+        if entry is not None and entry.platform == "group" and entry.config_entry_id:
+            config = self.hass.config_entries.async_get_entry(entry.config_entry_id)
+            if config is not None:
+                out.update(config.options.get("entities") or ())
+        return out
+
+    def _area_of(self, entity: str, registry, devices) -> str | None:
+        entry = registry.async_get(entity)
+        if entry is None:
+            return None
+        if entry.area_id:
+            return entry.area_id
+        device = devices.async_get(entry.device_id) if entry.device_id else None
+        return device.area_id if device is not None else None
+
+    def loose_lights(self, waiting: Iterable[str] = ()) -> list[str]:
+        """Lights that are on and in no room. Never a group of other lights, a member
+        of a room's group, a power circuit, a light hidden in Home Assistant (one
+        behind another, such as a template light's own), or a light in the area of a
+        room ``waiting`` for someone to leave."""
+        registry = er.async_get(self.hass)
+        devices = dr.async_get(self.hass)
         in_rooms: set[str] = set()
         for runner in self.rooms.values():
-            in_rooms.update(runner.config.lights)
+            for light in runner.config.lights:
+                in_rooms.add(light)
+                in_rooms.update(self._members(light, registry))
             in_rooms.update(runner.config.powered_by.values())
-        registry = er.async_get(self.hass)
+        busy: set[str] = set()
+        for room_id in waiting:
+            runner = self.rooms.get(room_id)
+            if runner is None:
+                continue
+            if runner.area_id:
+                busy.add(runner.area_id)
+            busy.update(a for light in runner.config.lights if (a := self._area_of(light, registry, devices)))
         found = []
         for state in self.hass.states.async_all("light"):
             if state.state != STATE_ON or state.entity_id in in_rooms:
                 continue
-            if state.attributes.get(ATTR_ENTITY_ID):
-                continue
+            if ATTR_ENTITY_ID in state.attributes:
+                continue  # a group (even an empty one)
             entry = registry.async_get(state.entity_id)
-            if entry is not None and entry.hidden:
+            if entry is not None and (entry.hidden or entry.platform == "group"):
+                continue
+            if busy and self._area_of(state.entity_id, registry, devices) in busy:
                 continue
             found.append(state.entity_id)
         return sorted(found)
@@ -1624,7 +1805,7 @@ class House:
                 if status != OUT_NOTHING:
                     plan[status].append(room_id)
         if lights_out.whole_house:
-            plan["loose"] = self.loose_lights()
+            plan["loose"] = self.loose_lights(plan[OUT_WAITING])
         return plan
 
     @callback
@@ -1634,19 +1815,23 @@ class House:
         if not ok:
             return self._lights_out_done(lights_out, now, why, skipped=not_today)
         if self.skip_next:
-            self.set_skip_next(False)
-            return self._lights_out_done(lights_out, now, why, skipped="'Skip the next Lights out' was on")
+            if lights_out.mode == LIGHTS_OUT_LIVE:
+                self.set_skip_next(False)  # only a live one uses it up
+                return self._lights_out_done(lights_out, now, why, skipped="'Skip the next Lights out' was on")
+            return self._lights_out_done(
+                lights_out, now, why,
+                skipped="'Skip the next Lights out' is on (left on for the next live one)",
+            )
         if lights_out.mode != LIGHTS_OUT_LIVE:
             return self._lights_out_done(lights_out, now, why, plan=self.lights_out_plan(lights_out))
-        until = self.next_start or now + timedelta(days=1)
         plan: dict[str, list[str]] = {OUT_OFF: [], OUT_WAITING: [], "loose": []}
         for room_id, runner in self.rooms.items():
             if lights_out.covers(room_id):
-                status = runner.lights_out(lights_out.name, until, lights_out.now_style)
+                status = runner.lights_out(lights_out.name, lights_out.now_style)
                 if status != OUT_NOTHING:
                     plan[status].append(room_id)
         if lights_out.whole_house:
-            plan["loose"] = self.loose_lights()
+            plan["loose"] = self.loose_lights(plan[OUT_WAITING])
             if plan["loose"]:
                 self.hass.async_create_task(self.hass.services.async_call(
                     "light", "turn_off", {ATTR_ENTITY_ID: plan["loose"]}, context=Context()

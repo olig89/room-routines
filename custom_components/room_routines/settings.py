@@ -79,6 +79,9 @@ def clean_room(user_input: Mapping[str, Any], previous: Mapping[str, Any] | None
     lux_sensors = [str(s) for s in user_input.get("lux_sensors") or [] if s]
     if not lux_sensors and user_input.get("lux_sensor"):
         lux_sensors = [str(user_input["lux_sensor"])]
+        kept = list((previous or {}).get("lux_sensors") or [])
+        if "lux_sensors" not in user_input and kept and kept[0] == lux_sensors[0]:
+            lux_sensors = kept  # a form with one sensor field doesn't drop the others
     room["lux_sensors"] = list(dict.fromkeys(lux_sensors))
     room["lux_sensor"] = room["lux_sensors"][0] if room["lux_sensors"] else None
     # Only the room's own lights can be marked as fading by themselves.

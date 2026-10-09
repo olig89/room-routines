@@ -41,6 +41,12 @@ class AmbientTracker:
         self.value, self.at = float(lux), t
         return True
 
+    def quiet_since(self) -> datetime | None:
+        """From when a reading can count (the lights off and settled), if they went off."""
+        if self._lights_on or self._off_since is None:
+            return None
+        return self._off_since + self.settle_after_off
+
     def ambient(self, now: datetime) -> float | None:
         if self.value is None or self.at is None or now - self.at > self.stale_after:
             return None

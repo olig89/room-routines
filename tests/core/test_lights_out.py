@@ -262,3 +262,50 @@ def test_runs_today_follows_the_days():
     assert lo.runs_today(Today(friday, None, False))[0]
     assert lo.runs_today(Today(saturday, None, False)) == (False, "not a workday")
     assert not lo.runs_today(Today(friday, False, False))[0]  # a public holiday
+
+
+# ---- from the review ----
+
+
+def test_a_sensor_not_heard_since_a_restart_counts_as_someone_there():
+    room = Room(bathroom(), default_schedule(), "Overnight", True, at(6, 0, 50))  # lit, MANUAL
+    room.unheard = {MOTION, PRESENCE}
+    d = room.lights_out(NIGHT, UNTIL, "Lights out")
+    assert not offs(d) and room.lights_out_until == UNTIL
+    # Once the wait for them is over, an empty room counts down and goes off.
+    room.tick(room.unheard_until)
+    d = room.tick(room.lights_out_at)
+    assert offs(d) and room.state is State.IDLE
+
+
+def test_off_at_once_while_waiting_in_a_room_lit_by_hand():
+    room = Room(bathroom(ends=(MOTION,)), default_schedule(), "Overnight", True, at(6, 0, 50))
+    room.sensor(MOTION, True, at(6, 0, 51))
+    room.lights_out(NIGHT, UNTIL, "Lights out")
+    d = room.sensor(MOTION, False, NIGHT + timedelta(seconds=5))
+    [off] = offs(d)
+    assert off.transition is None and room.state is State.IDLE
+
+
+def test_the_rooms_own_switch_off_of_a_manual_room_goes_idle():
+    room = Room(bathroom(), default_schedule(), "Overnight", True, at(6, 0, 50))
+    room.lights(False, own=True, now=at(6, 1))
+    assert room.state is State.IDLE
+    d = room.sensor(MOTION, True, at(6, 2))
+    assert [a for a in d.actions if isinstance(a, ApplyLook)]  # motion works again
+
+
+def test_a_wait_carried_over_marks_without_switching_off():
+    room = Room(bathroom(), default_schedule(), "Overnight", True, at(6, 0, 50))  # lit after a restart
+    d = room.wait_lights_out(NIGHT, UNTIL, "Lights out")
+    assert not offs(d) and room.lights_out_until == UNTIL
+    assert "lights off in 30 s" in d.reason  # nobody seen: the countdown starts, it doesn't switch off now
+    assert room.waiting_for() == {"name": "Lights out", "until": UNTIL}
+
+
+def test_restore_keeps_a_lights_out_mark():
+    room = Room(bathroom(), default_schedule(), "Overnight", True, at(6, 0, 50))
+    room.sensor(PRESENCE, True, at(6, 0, 51))
+    room.wait_lights_out(NIGHT, UNTIL, "Lights out")
+    room.restore(at(6, 0, 40), False, NIGHT + timedelta(seconds=1), ambient=False, someone=True)
+    assert room.lights_out_until == UNTIL

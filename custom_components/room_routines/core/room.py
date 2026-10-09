@@ -404,6 +404,9 @@ class Room:
         even when it didn't switch the lights on (someone sitting in a lit bathroom)."""
         if self.stealth:
             return False
+        sensors = set(self.config.triggers) | set(self.config.holds)
+        if self.unheard_until is not None and self.unheard & sensors:
+            return True  # a sensor that hasn't reported since the restart may see someone
         return self._any(self.config.triggers) or self._any(self.config.holds)
 
     def _tables(self, layer: Layer) -> tuple[Mapping[str, Look], Mapping[str, Look]]:
@@ -848,7 +851,9 @@ class Room:
         layers says neither: a room with sensors was lit by motion, else by its routine."""
         if self.state is not State.MANUAL:
             return self._unchanged()
+        mark = (self.lights_out_until, self.lights_out_at, self.lights_out_name)
         self._own(now)
+        self.lights_out_until, self.lights_out_at, self.lights_out_name = mark
         if ambient is None and someone is None:
             someone = self.config.has_sensors
             ambient = not someone
@@ -887,7 +892,10 @@ class Room:
         self.sensors[entity] = on
         self.unheard.discard(entity)
         is_trigger = entity in self.config.triggers
-        if entity in self.config.ends and was and not on and self.state is State.OWNED and self.someone_on:
+        waiting = self.lights_out_until is not None and self.state is not State.IDLE
+        if entity in self.config.ends and was and not on and (
+            waiting or (self.state is State.OWNED and self.someone_on)
+        ):
             # This sensor ends a visit (a door closing): lights off at once.
             return self._empty(now, None, f"{entity} went off", f"{entity} went off: lights off at once")
         if (waiting := self._lights_out_check(now)) is not None:
@@ -993,6 +1001,8 @@ class Room:
         if self.state is State.IDLE:
             self._clear_lights_out()
             return self._decide(f"{name}: already off")
+        if self.unheard & (set(self.config.triggers) | set(self.config.holds)) and self.unheard_until is None:
+            self.unheard_until = now + UNHEARD_FOR  # sensors not heard since a restart: wait for them
         if all_now or not self.someone_seen():
             return self._lights_out_off(now, f"{name}: lights off", self._fade())
         self.lights_out_until = until
@@ -1000,6 +1010,27 @@ class Room:
         self.lights_out_at = None
         self.deadline = None  # the room now counts down on Lights out's clock
         return self._decide(f"{name}: someone's here, lights off once the room is empty", WakeAt(until))
+
+    def wait_lights_out(self, now: datetime, until: datetime, name: str) -> Decision:
+        """Carry on a Lights out that was waiting before a restart or reload: the room
+        goes off once it is empty, whatever it looks like now."""
+        if self.state is State.IDLE or now >= until:
+            return self._unchanged()
+        self.lights_out_until, self.lights_out_name, self.lights_out_at = until, name, None
+        self.deadline = None
+        if self.unheard & (set(self.config.triggers) | set(self.config.holds)) and self.unheard_until is None:
+            self.unheard_until = now + UNHEARD_FOR
+        decision = self._lights_out_check(now)
+        wakes = [WakeAt(t) for t in (self.next_wake(),) if t is not None]
+        if decision is None:
+            return self._decide(f"{name}: still waiting for the room to empty", *wakes)
+        return self._decide(decision.reason, *decision.actions, *wakes)
+
+    def waiting_for(self) -> dict | None:
+        """A Lights out waiting here, to remember across a restart."""
+        if self.lights_out_until is None or self.state is State.IDLE:
+            return None
+        return {"name": self.lights_out_name, "until": self.lights_out_until}
 
     def _fade(self) -> timedelta | None:
         return self.config.fade_out if self.config.fade_out > timedelta(0) else None
@@ -1054,6 +1085,8 @@ class Room:
         after the change."""
         self.ambient.lights_changed(any_on, now)
         if own:
+            if not any_on and self.state is State.MANUAL:
+                self._go_idle()  # switched off by something of the room's own (a Lights out)
             return self._unchanged()
         if self.state is State.IDLE:
             if any_on:
@@ -1196,8 +1229,6 @@ class Room:
         return self._check_timer(now) or self._decide(f"stealth mode off: {self.state.value}")
 
     def tick(self, now: datetime) -> Decision:
-        if (waiting := self._lights_out_check(now)) is not None:
-            return waiting
         if self.unheard_until is not None and now >= self.unheard_until:
             # Sensors still silent: stop waiting for them and count down as usual.
             self.unheard.clear()
@@ -1205,6 +1236,8 @@ class Room:
             countdown = self._check_timer(now)
             if countdown is not None:
                 return countdown
+        if (waiting := self._lights_out_check(now)) is not None:
+            return waiting
         if self.adopt_at is not None and now >= self.adopt_at:
             self.adopt_at = None
             if self.state is State.MANUAL:

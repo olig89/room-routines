@@ -986,13 +986,6 @@ class RoomRoutinesPanel extends HTMLElement {
     const num = (key, label, unit, help, max) => `<label>${label}
       <span class="inputunit"><input type="number" min="0" max="${max}" step="1" value="${r[key] ?? ""}" data-room-field="${key}" ${key === "threshold_lux" ? `placeholder="any"` : ""}> ${unit}</span>
       ${help ? `<span class="help">${help}</span>` : ""}</label>`;
-    const luxOptions = Object.keys(this._hass.states)
-      .filter((e) => e.startsWith("sensor."))
-      .sort((a, b) => {
-        const la = this._hass.states[a].attributes.device_class === "illuminance" ? 0 : 1;
-        const lb = this._hass.states[b].attributes.device_class === "illuminance" ? 0 : 1;
-        return la - lb || this._name(a).localeCompare(this._name(b));
-      });
     return `
       <div class="detailhead"><button class="btn small" data-action="room-cancel"><ha-icon icon="mdi:arrow-left"></ha-icon> Back</button></div>
       <div class="card form">
@@ -1269,7 +1262,7 @@ class RoomRoutinesPanel extends HTMLElement {
         </select></label>` : ""}
         ${x.when === "entity" ? `<label>Entity <input class="ent" list="rr-entities" placeholder="e.g. input_boolean.bedtime" value="${esc(x.entity || "")}" data-lo="${i}" data-field="entity" aria-label="Entity"></label>
           <label>turns <input type="text" class="short" value="${esc(x.state || "on")}" data-lo="${i}" data-field="state" aria-label="State"></label>` : ""}
-        <label>On <select data-lo="${i}" data-field="days" data-rerender>
+        <label>On <select data-lo="${i}" data-field="days" data-rerender title="Judged on the day it runs: at 01:00 on workdays means the nights after Sunday to Thursday.">
           ${Object.entries(TIMER_DAYS).map(([k, v]) => `<option value="${k}" ${k === x.days ? "selected" : ""}>${v}</option>`).join("")}
         </select></label>
         ${x.days === "days" ? `<div>${WEEKDAYS.map((w, j) => `<label class="inline"><input type="checkbox" data-lo-day="${i}" data-day="${j}" ${(x.weekdays || []).includes(j) ? "checked" : ""}> ${w.slice(0, 3)}</label>`).join("")}</div>` : ""}
@@ -1651,6 +1644,7 @@ class RoomRoutinesPanel extends HTMLElement {
         const x = this._loDraft.items[Number(el.dataset.lo)];
         x[el.dataset.field] = el.value;
         x._preview = null;
+        if (el.dataset.field === "when" && el.value === "period" && !x.period) x.period = this._data.house.order[0];
         if (el.dataset.rerender !== undefined) this._render();
       })
     );
@@ -2065,6 +2059,11 @@ class RoomRoutinesPanel extends HTMLElement {
         const items = this._loDraft.items;
         if (items.some((x) => x.when === "time" && !x.at)) {
           this._loError = "Every Lights out at a time needs the time.";
+          this._render();
+          return;
+        }
+        if (items.some((x) => x._chosen && !(x.rooms || []).length)) {
+          this._loError = "A Lights out for chosen rooms needs at least one room (or tick The whole house).";
           this._render();
           return;
         }

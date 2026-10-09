@@ -112,12 +112,15 @@ room can run in log-only mode first.
   only to start with, so it can run beside an automation it replaces), *Check
   now* on the page says what it would do, and the page and the logbook list its
   recent runs. A house-wide *Skip the next Lights out* switch skips one run and
-  then switches itself off. Waiting isn't remembered across a restart.
+  then switches itself off. A room still waiting carries on after a restart or a
+  reload. "Workdays" is judged on the day it runs: 01:00 on workdays covers the
+  nights after Sunday to Thursday. Lights in no room skip groups and their
+  members, and lights in the area of a room it is waiting for.
 - **Fade-out:** lights with a native transition fade by themselves; others (KNX)
   get small brightness steps, and come back at their old level next time.
 - **Per room:** a *Status* sensor (idle / lights on by motion / switched on by
   hand, with the reason, and a `layer` attribute saying what has the lights:
-  `inform` (an Inform holds a light), `ambient` (the routine), `someone` (motion),
+  `ambient` (the routine), `someone` (motion),
   `hand` (a change made by hand) or
   empty when they're off), a *Mode* select (off / log only / live; new rooms start
   in log only) and a *Light level* sensor (the held ambient value).

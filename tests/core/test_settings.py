@@ -368,3 +368,14 @@ def test_lights_outs_follow_period_renames_and_room_removals():
     gone = remove_room(options, room_id)
     assert [r["id"] for r in gone["lights_outs"]] == ["a", "b"]
     assert gone["lights_outs"][1]["rooms"] == [other]
+
+
+def test_a_one_sensor_form_keeps_the_other_light_sensors():
+    from custom_components.room_routines.settings import clean_room
+
+    previous = clean_room({**ROOM, "lux_sensors": ["sensor.top", "sensor.bottom"]}, None)
+    assert previous["lux_sensors"] == ["sensor.top", "sensor.bottom"]
+    edited = clean_room({**ROOM, "lux_sensor": "sensor.top"}, previous)
+    assert edited["lux_sensors"] == ["sensor.top", "sensor.bottom"]
+    changed = clean_room({**ROOM, "lux_sensor": "sensor.other"}, previous)
+    assert changed["lux_sensors"] == ["sensor.other"]
