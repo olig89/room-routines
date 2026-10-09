@@ -179,6 +179,9 @@
     "switch": {
       "stealth_mode": {
         "name": "Stealth mode"
+      },
+      "skip_next_lights_out": {
+        "name": "Skip the next Lights out"
       }
     }
   },

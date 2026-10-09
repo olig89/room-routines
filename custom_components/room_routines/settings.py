@@ -11,7 +11,17 @@ import uuid
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from .const import CONF_ALT_DAYS, CONF_HIDDEN_AREAS, CONF_HOUSE_RULES, CONF_PERIODS, CONF_ROOMS, CONF_TRACKS, clean_options
+from .const import (
+    CONF_ALT_DAYS,
+    CONF_HIDDEN_AREAS,
+    CONF_HOUSE_RULES,
+    CONF_LIGHTS_OUTS,
+    CONF_PERIODS,
+    CONF_ROOMS,
+    CONF_TRACKS,
+    clean_options,
+)
+from .core.lights_out import AT_PERIOD, lights_out_from, lights_out_to
 from .core.rules import condition_from, condition_to, rule_from, rule_to
 from .core.signals import signal_from, signal_to
 from .core.serial import first_look, look_from, look_to, room_from, schedule_from, tracks_from, tracks_to
@@ -164,6 +174,16 @@ def remove_room(options: Mapping[str, Any], room_id: str) -> dict[str, Any]:
     out[CONF_HOUSE_RULES] = [
         r for r in out.get(CONF_HOUSE_RULES) or [] if "rooms" not in r or r["rooms"]
     ]
+    # The same for a Lights out for chosen rooms.
+    if out.get(CONF_LIGHTS_OUTS):
+        kept = []
+        for row in out[CONF_LIGHTS_OUTS]:
+            if row.get("rooms"):
+                row = {**row, "rooms": [r for r in row["rooms"] if r != room_id]}
+                if not row["rooms"]:
+                    continue
+            kept.append(row)
+        out[CONF_LIGHTS_OUTS] = kept
     # A room made from an area would come straight back: hide the area instead.
     if area_id and not any(r.get("area_id") == area_id for r in out[CONF_ROOMS].values()):
         hidden = set(out.get(CONF_HIDDEN_AREAS) or [])
@@ -221,6 +241,34 @@ def set_house_rules(options: Mapping[str, Any], rules: Iterable[Mapping[str, Any
     except (ValueError, KeyError, TypeError) as err:
         raise SettingsError("invalid_rules") from err
     out[CONF_HOUSE_RULES] = cleaned
+    return out
+
+
+def set_lights_outs(options: Mapping[str, Any], items: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Every Lights out at once. A new one (no id) gets an id."""
+    out = _options(options)
+    known = set(out[CONF_ROOMS])
+    periods = set(schedule_from(out).order())
+    cleaned: list[dict[str, Any]] = []
+    ids: set[str] = set()
+    try:
+        for data in items:
+            row = dict(data)
+            row["id"] = str(row.get("id") or uuid.uuid4().hex[:8])
+            lights_out = lights_out_from(row)
+            if lights_out.id in ids:
+                raise SettingsError("invalid_lights_out")
+            if any(r not in known for r in lights_out.rooms):
+                raise SettingsError("unknown_room")
+            if lights_out.when == AT_PERIOD and lights_out.period not in periods:
+                raise SettingsError("invalid_lights_out")
+            ids.add(lights_out.id)
+            cleaned.append(lights_out_to(lights_out))
+    except SettingsError:
+        raise
+    except (ValueError, KeyError, TypeError) as err:
+        raise SettingsError("invalid_lights_out") from err
+    out[CONF_LIGHTS_OUTS] = cleaned
     return out
 
 
@@ -303,6 +351,17 @@ def set_periods(
             room["rules"] = _moved_rules(room["rules"])
     if out.get(CONF_HOUSE_RULES):
         out[CONF_HOUSE_RULES] = _moved_rules(out[CONF_HOUSE_RULES])
+    # A Lights out at a period's start follows a rename (a removed period: it goes).
+    if out.get(CONF_LIGHTS_OUTS):
+        kept_outs = []
+        for row in out[CONF_LIGHTS_OUTS]:
+            if row.get("when") == AT_PERIOD:
+                target = renames.get(row.get("period"), row.get("period"))
+                if not target or target not in names:
+                    continue
+                row = {**row, "period": target}
+            kept_outs.append(row)
+        out[CONF_LIGHTS_OUTS] = kept_outs
     tracks = out.get(CONF_TRACKS)
     if tracks and tracks.get("periods") is not None:
         # The Dark Day periods follow renames too (a removed one drops out).

@@ -16,7 +16,7 @@ be a Home Assistant scene. A light switched on by hand is left alone, and change
 made by hand are remembered so the page can suggest better looks or times. Each
 room can run in log-only mode first.
 
-**Status: early development (0.6.1).** Install through HACS as a custom repository.
+**Status: early development (0.11.0).** Install through HACS as a custom repository.
 
 ## What you get
 
@@ -24,7 +24,7 @@ room can run in log-only mode first.
   - **Status**: each room's mode, what it's doing and why, the switch-off countdown, its light level against the threshold, its sensors (lit when they see someone), its lights and the look for the current period.
   - **Room detail**: a looks table (period × light) for Normal days and for Dark Days, with icon buttons under each period name: *Save as now* (saves the lights as a Home Assistant scene through the scene editor's own API, so the same scene can go on a wall button), *Pick a scene*, *Edit*, *Keep dark* and *Use previous* / *Use Normal*; suggestions from how the lights get changed by hand; what the room did, from Home Assistant's history; and for rooms in log-only, a **dry-run check** that pairs every switch the room would have made with the light's real switch and scores the match.
   - **Your day**: the periods as a 24-hour strip, with a row for days that start differently, and whether today is a Normal day or a Dark Day, and why.
-  - **Settings** (administrators only, and refused to anyone else by the server): add, change or remove rooms, with lights and sensors suggested from the area and any entity choosable; change, add, rename or remove periods (rooms' looks follow a renamed period, and a removed period's look passes to the period after it when that one was using it); Dark Days (where the reading comes from, which periods, the thresholds, the sunlight floor and the brightness).
+  - **Settings** (administrators only, and refused to anyone else by the server): Lights out; add, change or remove rooms, with lights and sensors suggested from the area and any entity choosable; change, add, rename or remove periods (rooms' looks follow a renamed period, and a removed period's look passes to the period after it when that one was using it); Dark Days (where the reading comes from, which periods, the thresholds, the sunlight floor and the brightness).
   - A header with the current period, a stealth switch, and a banner across the page while stealth is on.
 - **Setup** creates five periods (overnight 23:00, early morning 05:30, morning
   07:00, day 09:00, evening 17:00). In the settings you can change the times,
@@ -93,6 +93,26 @@ room can run in log-only mode first.
   touches it (a scene look is sent without it), it shows even with the room off,
   and when it ends the light goes back to what the room is doing, or to how it
   was before. If two want the same light, the first in the list wins.
+- **Lights out** (optional, any number): switch the house off at the end of the
+  day, at a time, when a period starts or when an entity reaches a state (a
+  bedtime switch), every day, on workdays or on chosen days. For the whole house
+  (every room, and every light that's in no room, apart from groups and lights
+  hidden in Home Assistant) or chosen rooms, in one of two ways:
+  - **off once empty** (the default): rooms where nobody is detected go dark now;
+    a room where a sensor sees someone (a presence sensor counts, even one that
+    only keeps the lights on) goes fully off once it's empty, after its own
+    timeout and with its own fade, instead of falling back to its routine. That
+    waiting ends when the next period starts;
+  - **all off now**: everything goes off, whoever is there.
+  Rooms without sensors go off at once either way. Lights an Inform holds and
+  power circuits are never touched, and once a room has gone off, motion works in
+  it as usual. A room whose routine is live decides for itself; in a room whose
+  routine is off or in log only, the Lights out reads the sensors and switches
+  the lights itself. Each Lights out has its own mode (off / log only / live, log
+  only to start with, so it can run beside an automation it replaces), *Check
+  now* on the page says what it would do, and the page and the logbook list its
+  recent runs. A house-wide *Skip the next Lights out* switch skips one run and
+  then switches itself off. Waiting isn't remembered across a restart.
 - **Fade-out:** lights with a native transition fade by themselves; others (KNX)
   get small brightness steps, and come back at their old level next time.
 - **Per room:** a *Status* sensor (idle / lights on by motion / switched on by
@@ -138,8 +158,8 @@ room can run in log-only mode first.
   weeks.
 - **House-wide:** a *Period* select (choose one by hand to hold it until the next
   scheduled start), a *Day* select (Normal day or Dark Day, with the reading and
-  the reason; choose one by hand to hold it until the next period) and a *Stealth mode* switch (every motion sensor reads as
-  "nobody here"; lit rooms still go dark).
+  the reason; choose one by hand to hold it until the next period), a *Stealth mode* switch (every motion sensor reads as
+  "nobody here"; lit rooms still go dark) and a *Skip the next Lights out* switch.
 - **Looks:** a new room switches every light on at its last brightness in every
   period. Set the lights how you want them and run the **Save a room look**
   action (`room_routines.set_look`) for the period; "scene" turns on a scene; "nothing" keeps

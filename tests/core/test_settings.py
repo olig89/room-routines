@@ -319,3 +319,52 @@ def test_a_dark_day_look_only_carries_where_it_was_used():
     options["rooms"][room_id]["dim_looks"] = {"Early morning": {"lights": {"light.ceiling": {"on": True, "brightness_pct": 5}}}}
     options = set_periods(options, ROWS_WITHOUT_EARLY, [], {"Early morning": None})
     assert options["rooms"][room_id]["dim_looks"] == {}
+
+
+# ---- Lights out ----
+
+from custom_components.room_routines.settings import set_lights_outs  # noqa: E402
+
+
+def test_lights_outs_get_ids_and_are_checked():
+    options, room_id = add_room(base(), ROOM)
+    options = set_lights_outs(options, [
+        {"name": "Night", "when": "time", "at": "01:00"},
+        {"when": "period", "period": "Overnight", "rooms": [room_id], "style": "now", "mode": "live"},
+    ])
+    first, second = options["lights_outs"]
+    assert first["id"] and first["id"] != second["id"] and first["mode"] == "log_only"
+    assert second["rooms"] == [room_id] and second["style"] == "now"
+    # Saving again keeps the ids.
+    again = set_lights_outs(options, options["lights_outs"])
+    assert [r["id"] for r in again["lights_outs"]] == [first["id"], second["id"]]
+    with pytest.raises(SettingsError) as err:
+        set_lights_outs(options, [{"when": "time", "at": "01:00", "rooms": ["nowhere"]}])
+    assert err.value.key == "unknown_room"
+    for bad in ({"when": "period", "period": "Brunch"}, {"when": "time"}, {"when": "entity"},
+                {"when": "time", "at": "01:00", "days": "days"}):
+        with pytest.raises(SettingsError) as err:
+            set_lights_outs(options, [bad])
+        assert err.value.key == "invalid_lights_out"
+    with pytest.raises(SettingsError):
+        set_lights_outs(options, [first, first])  # the same id twice
+
+
+def test_lights_outs_follow_period_renames_and_room_removals():
+    options, room_id = add_room(base(), ROOM)
+    options, other = add_room(options, {**ROOM, "name": "Hall", "area_id": "hall"})
+    options = set_lights_outs(options, [
+        {"id": "a", "when": "period", "period": "Evening"},
+        {"id": "b", "when": "time", "at": "01:00", "rooms": [room_id, other]},
+        {"id": "c", "when": "time", "at": "02:00", "rooms": [room_id]},
+    ])
+    rows = [dict(p) for p in schedule_to(default_schedule())["periods"]]
+    rows = [{**r, "name": "Dusk"} if r["name"] == "Evening" else r for r in rows]
+    renamed = set_periods(options, rows, [], {"Evening": "Dusk"})
+    assert renamed["lights_outs"][0]["period"] == "Dusk"
+    removed = set_periods(options, [r for r in rows if r["name"] != "Dusk"], [], {"Evening": None})
+    assert [r["id"] for r in removed["lights_outs"]] == ["b", "c"]
+    # Removing a room takes it out; a Lights out left with no rooms goes (it would cover the house).
+    gone = remove_room(options, room_id)
+    assert [r["id"] for r in gone["lights_outs"]] == ["a", "b"]
+    assert gone["lights_outs"][1]["rooms"] == [other]

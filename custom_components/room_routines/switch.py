@@ -1,4 +1,5 @@
-"""Stealth mode: every motion sensor reads as "nobody here" while it is on."""
+"""Stealth mode: every motion sensor reads as "nobody here" while it is on.
+Skip the next Lights out: the next one to run is skipped, and the switch goes off."""
 
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ async def async_setup_entry(
     entry: RoomRoutinesConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    async_add_entities([StealthSwitch(entry.runtime_data)])
+    async_add_entities([StealthSwitch(entry.runtime_data), SkipLightsOutSwitch(entry.runtime_data)])
 
 
 class StealthSwitch(HouseEntity, SwitchEntity, RestoreEntity):
@@ -48,3 +49,28 @@ class StealthSwitch(HouseEntity, SwitchEntity, RestoreEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         self.house.set_stealth(False)
+
+
+class SkipLightsOutSwitch(HouseEntity, SwitchEntity, RestoreEntity):
+    _platform_domain = "switch"
+    _attr_icon = "mdi:weather-night"
+
+    def __init__(self, house) -> None:
+        super().__init__(house, "skip_next_lights_out")
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.house.skip_entity_id = self.entity_id
+        last = await self.async_get_last_state()
+        if last is not None and last.state == STATE_ON:
+            self.house.set_skip_next(True)
+
+    @property
+    def is_on(self) -> bool:
+        return self.house.skip_next
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        self.house.set_skip_next(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        self.house.set_skip_next(False)

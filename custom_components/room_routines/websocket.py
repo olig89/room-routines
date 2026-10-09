@@ -35,6 +35,7 @@ from .core.lux import dark_enough
 from .core.parity import any_on, compare, edges, windows, within
 from .core.serial import look_to, schedule_to, target_to, tracks_to
 from .core.tracks import DIM, NORMAL, TRACK_LABELS, TRACKS
+from .core.lights_out import lights_out_from
 from .house import House, RoomRunner, capture, scene_entities
 from .settings import (
     SettingsError,
@@ -42,6 +43,7 @@ from .settings import (
     remove_room,
     set_look,
     set_house_rules,
+    set_lights_outs,
     set_periods,
     set_tracks,
     unhide_area,
@@ -61,6 +63,8 @@ def async_register_websocket(hass: HomeAssistant) -> None:
         ws_save_periods,
         ws_save_tracks,
         ws_save_house_rules,
+        ws_save_lights_outs,
+        ws_lights_out_preview,
         ws_scene_draft,
         ws_dismiss,
         ws_history,
@@ -188,6 +192,7 @@ def room_snapshot(hass: HomeAssistant, runner: RoomRunner) -> dict[str, Any]:
         "someone_dim_looks": dict(stored.get("someone_dim_looks") or {}),
         # Starting the routine runs it until stopped (not a visit that times out).
         "runs_ambient": runner.config.runs_ambient,
+        "lights_out": runner.lights_out_waiting(),
         "layer": runner.layer(),
         "suggestions": [_suggestion(s) for s in house.suggestions(runner)],
         "hand_changes_28d": sum(
@@ -226,6 +231,13 @@ def snapshot(hass: HomeAssistant) -> dict[str, Any]:
             "people": sorted(state.entity_id for state in hass.states.async_all("person")),
             "workday_sensor": house.workday_sensor(),
             "house_rules": list(house.options.get("house_rules") or []),
+            "lights_outs": [
+                {**row, "text": next((house.describe_lights_out(lo) for lo in house.lights_outs if lo.id == row.get("id")), "")}
+                for row in house.options.get("lights_outs") or []
+            ],
+            "lights_out_runs": list(reversed(house.lights_out_runs)),
+            "skip_next": house.skip_next,
+            "skip_entity": house.skip_entity_id,
         },
         "rooms": [room_snapshot(hass, runner) for runner in house.rooms.values()],
     }
@@ -552,6 +564,45 @@ def ws_save_house_rules(hass: HomeAssistant, connection: websocket_api.ActiveCon
         return
     _save(hass, house, options)
     connection.send_result(msg["id"], {})
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/save_lights_outs", vol.Required("lights_outs"): [dict]}
+)
+@websocket_api.require_admin
+@callback
+def ws_save_lights_outs(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    house = _house(hass)
+    if house is None:
+        connection.send_error(msg["id"], "not_set_up", "Room Routines isn't set up")
+        return
+    try:
+        options = set_lights_outs(house.entry.options, msg["lights_outs"])
+    except SettingsError as err:
+        _error(connection, msg, err)
+        return
+    _save(hass, house, options)
+    connection.send_result(msg["id"], {})
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/lights_out_preview", vol.Required("lights_out"): dict}
+)
+@websocket_api.require_admin
+@callback
+def ws_lights_out_preview(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """What a Lights out (saved or not) would do if it ran now. Changes nothing."""
+    house = _house(hass)
+    if house is None:
+        connection.send_error(msg["id"], "not_set_up", "Room Routines isn't set up")
+        return
+    try:
+        lights_out = lights_out_from({"id": "preview", **msg["lights_out"]})
+    except (KeyError, ValueError, TypeError):
+        connection.send_error(msg["id"], "invalid_lights_out", "That Lights out isn't complete")
+        return
+    plan = house.lights_out_plan(lights_out)
+    connection.send_result(msg["id"], {**plan, "text": house.plan_text(plan, live=False, log_only=False)})
 
 
 # ---- history and the dry-run check -------------------------------------------------

@@ -7,7 +7,7 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.10.0";
+const PANEL_VERSION = "0.11.0";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
@@ -33,11 +33,21 @@ const HAND_HOLD = {
   minutes: "For a number of minutes",
 };
 const TIMER_DAYS = { every_day: "Every day", workdays: "Workdays", days: "Chosen days" };
+const LIGHTS_OUT_WHEN = { time: "At a time", period: "When a period starts", entity: "When something turns on" };
+const LIGHTS_OUT_STYLE = {
+  once_empty: "Off once empty",
+  now: "All off now",
+};
+const LIGHTS_OUT_STYLE_HELP = {
+  once_empty: "Rooms where nobody is detected go dark now. A room where a sensor sees someone goes fully off once it's empty (after its own timeout, with its own fade), instead of going dark on them. That waiting ends when the next period starts.",
+  now: "Everything goes off now, whoever is there.",
+};
 const RULE_ACTIONS = { nothing: "Do nothing", look: "Use another look", cap: "No brighter than" };
 const ERRORS = {
   no_name: "Give the room a name.",
   invalid_room: "A room needs at least one light, a sensor can't both switch the lights on and only keep them on, and every timer needs a time.",
   invalid_signals: "Each Inform needs an entity and a state, and at least one of the room's lights.",
+  invalid_lights_out: "Each Lights out needs a time, a period or an entity and its state, and chosen days need at least one day.",
   invalid_rules: "Every condition and rule needs an entity and a state; a rule using another look needs a scene or a period, and a brightness limit a level from 1 to 100 %.",
   invalid_room_times: "The room's own start times must give every period a different time.",
   invalid_periods: "Every period needs its own name and a start time no other period uses on the same days.",
@@ -168,7 +178,7 @@ class RoomRoutinesPanel extends HTMLElement {
   }
 
   _editing() {
-    return !!(this._editLook || this._roomDraft || this._periodDraft || this._tracksDraft || this._scenePick || this._houseRulesDraft);
+    return !!(this._editLook || this._roomDraft || this._periodDraft || this._tracksDraft || this._scenePick || this._houseRulesDraft || this._loDraft);
   }
 
   get _admin() {
@@ -405,6 +415,7 @@ class RoomRoutinesPanel extends HTMLElement {
         ${d.house.tracks?.enabled ? `<label class="inline">Today is <select data-action="hold-track" title="${esc(this._trackTitle(d.house))}">
           ${Object.entries(TRACK_LABEL).map(([k, v]) => `<option value="${k}" ${k === d.house.track ? "selected" : ""}>${v}</option>`).join("")}
         </select>${d.house.track_by_hand ? ` <small class="muted">(by hand until the next period)</small>` : ""}</label>` : ""}
+        ${d.rooms.some((r) => r.lights_out) ? `<div><ha-icon icon="mdi:weather-night"></ha-icon> ${d.rooms.filter((r) => r.lights_out).map((r) => `<b>${esc(r.name)}</b> ${r.lights_out.at ? `goes off in <span data-deadline="${esc(r.lights_out.at)}">${countdown(r.lights_out.at)}</span>` : "goes off once it's empty"}`).join(", ")} (${esc(d.rooms.find((r) => r.lights_out).lights_out.name)}).</div>` : ""}
       </div>
       ${this._roomGrid(d)}`;
   }
@@ -436,6 +447,9 @@ class RoomRoutinesPanel extends HTMLElement {
     if (held.length && !room.paused) bits.push(`changed by hand: ${held.map(([l, u]) => esc(this._name(l)) + (u ? ` until ${esc(hhmm(u))}` : "")).join(", ")}`);
     else if (held.length && held.some(([, u]) => u)) bits.push(`back to the routine at ${esc(hhmm(held.map(([, u]) => u).filter(Boolean).sort()[0]))}`);
     for (const sig of room.signals_now || []) bits.push(`<span class="signal">inform: ${esc(sig.name)} on ${sig.lights.map((l) => esc(this._name(l))).join(", ")}</span>`);
+    if (room.lights_out) bits.push(room.lights_out.at
+      ? `${esc(room.lights_out.name)}: empty, off in <span data-deadline="${esc(room.lights_out.at)}">${countdown(room.lights_out.at)}</span>`
+      : `${esc(room.lights_out.name)}: off once the room is empty (until ${esc(hhmm(room.lights_out.until))})`);
     if (room.unmet) bits.push(`waiting: only when ${esc(room.unmet)}`);
     if (room.blending) bits.push(`blending into ${esc(room.blending.into)} (${Math.round(room.blending.fraction * 100)} %)`);
     if (room.mode === "log_only") bits.push(`<span class="muted">(log only: switching nothing)</span>`);
@@ -902,6 +916,7 @@ class RoomRoutinesPanel extends HTMLElement {
     if (this._periodDraft) return this._periodForm();
     if (this._tracksDraft) return this._tracksForm();
     if (this._houseRulesDraft) return this._houseRulesForm();
+    if (this._loDraft) return this._lightsOutForm();
     return `
       <h2>Rooms</h2>
       <div class="card">
@@ -925,6 +940,11 @@ class RoomRoutinesPanel extends HTMLElement {
           ? (d.house.house_rules || []).map((r) => `<div>${esc(this._ruleText(r))} <small class="muted">${(r.rooms || []).length ? `in ${r.rooms.map((id) => esc(d.rooms.find((x) => x.id === id)?.name || id)).join(", ")}` : "in every room"}</small></div>`).join("")
           : `<div class="meta">None. A house rule changes how rooms behave while something holds: away from home, the baby asleep.</div>`}
         <div class="row"><button class="btn small" data-action="edit-house-rules">Change</button></div>
+      </div>
+      <h2>Lights out</h2>
+      <div class="card">
+        ${this._lightsOutSummary(d)}
+        <div class="row"><button class="btn small" data-action="edit-lights-outs">Change</button></div>
       </div>
       <h2>Dark Days</h2>
       <div class="card">
@@ -1202,6 +1222,101 @@ class RoomRoutinesPanel extends HTMLElement {
       });
   }
 
+  _roomNames(ids) {
+    const d = this._data;
+    return (ids || []).map((id) => esc(d.rooms.find((x) => x.id === id)?.name || id)).join(", ");
+  }
+
+  _lightsOutRun(r) {
+    const when = new Date(r.at);
+    const day = when.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+    let what;
+    if (r.skipped) what = `skipped: ${esc(r.skipped)}`;
+    else {
+      const bits = [];
+      const live = r.mode === "live";
+      if ((r.off || []).length) bits.push(`${live ? "switched off" : "would switch off"} ${this._roomNames(r.off)}`);
+      if ((r.waiting || []).length) bits.push(`${live ? "waited for" : "would wait for"} ${this._roomNames(r.waiting)}`);
+      if ((r.loose || []).length) bits.push(`${live ? "switched off" : "would switch off"} ${r.loose.map((l) => esc(this._name(l))).join(", ")} (in no room)`);
+      what = bits.join("; ") || "nothing was on";
+      if (!live) what = `<span class="muted">log only:</span> ${what}`;
+    }
+    return `<div class="logrow"><span class="meta">${esc(day)} ${esc(hhmm(r.at))}</span> <b>${esc(r.name)}</b> <span class="meta">(${esc(r.why)})</span>: ${what}</div>`;
+  }
+
+  _lightsOutSummary(d) {
+    const items = d.house.lights_outs || [];
+    const runs = (d.house.lights_out_runs || []).slice(0, 6);
+    return `
+      ${items.length
+        ? items.map((x) => `<div><b>${esc(x.name)}</b> ${esc(x.text || "")} · ${esc(LIGHTS_OUT_STYLE[x.style] || x.style)} · ${(x.rooms || []).length ? `in ${this._roomNames(x.rooms)}` : "the whole house"} · <span class="pill mode-${esc(x.mode)}">${esc(MODE_LABEL[x.mode] || x.mode)}</span></div>`).join("")
+        : `<div class="meta">None. A Lights out switches the house off at the end of the day, without going dark on someone still in a room.</div>`}
+      ${items.length && d.house.skip_entity ? `<div class="row"><label class="inline"><input type="checkbox" data-action="skip-lights-out" ${d.house.skip_next ? "checked" : ""}> Skip the next Lights out <span class="meta">(switches itself off after one)</span></label></div>` : ""}
+      ${runs.length ? `<details data-pref="lights-out-runs"${loadPref("lights-out-runs", false) ? " open" : ""}><summary>Recent runs</summary>${runs.map((r) => this._lightsOutRun(r)).join("")}</details>` : ""}`;
+  }
+
+  _lightsOutForm() {
+    const d = this._data;
+    const items = this._loDraft.items;
+    const row = (x, i) => `<div class="cond rule lightsout">
+        <label>Name <input type="text" value="${esc(x.name || "")}" data-lo="${i}" data-field="name" aria-label="Name"></label>
+        <label>When <select data-lo="${i}" data-field="when" data-rerender>
+          ${Object.entries(LIGHTS_OUT_WHEN).map(([k, v]) => `<option value="${k}" ${k === x.when ? "selected" : ""}>${v}</option>`).join("")}
+        </select></label>
+        ${x.when === "time" ? `<label>At <input type="time" value="${esc(x.at || "")}" data-lo="${i}" data-field="at" aria-label="At"></label>` : ""}
+        ${x.when === "period" ? `<label>Period <select data-lo="${i}" data-field="period">
+          ${d.house.order.map((p) => `<option value="${esc(p)}" ${p === x.period ? "selected" : ""}>${esc(p)}</option>`).join("")}
+        </select></label>` : ""}
+        ${x.when === "entity" ? `<label>Entity <input class="ent" list="rr-entities" placeholder="e.g. input_boolean.bedtime" value="${esc(x.entity || "")}" data-lo="${i}" data-field="entity" aria-label="Entity"></label>
+          <label>turns <input type="text" class="short" value="${esc(x.state || "on")}" data-lo="${i}" data-field="state" aria-label="State"></label>` : ""}
+        <label>On <select data-lo="${i}" data-field="days" data-rerender>
+          ${Object.entries(TIMER_DAYS).map(([k, v]) => `<option value="${k}" ${k === x.days ? "selected" : ""}>${v}</option>`).join("")}
+        </select></label>
+        ${x.days === "days" ? `<div>${WEEKDAYS.map((w, j) => `<label class="inline"><input type="checkbox" data-lo-day="${i}" data-day="${j}" ${(x.weekdays || []).includes(j) ? "checked" : ""}> ${w.slice(0, 3)}</label>`).join("")}</div>` : ""}
+        <label>How <select data-lo="${i}" data-field="style" data-rerender>
+          ${Object.entries(LIGHTS_OUT_STYLE).map(([k, v]) => `<option value="${k}" ${k === x.style ? "selected" : ""}>${v}</option>`).join("")}
+        </select><span class="help">${esc(LIGHTS_OUT_STYLE_HELP[x.style] || "")} Rooms without sensors, and lights in no room, go off at once either way. Lights an Inform holds and power circuits are never touched.</span></label>
+        <div><label class="inline"><input type="checkbox" data-lo-whole="${i}" ${(x.rooms || []).length ? "" : "checked"}> The whole house <span class="meta">(every room, and every light that's in no room, apart from groups and hidden lights)</span></label></div>
+        ${(x.rooms || []).length || x._chosen ? `<div class="roomticks">${d.rooms.map((room) => `<label class="inline"><input type="checkbox" data-lo-room="${i}" data-room-id="${esc(room.id)}" ${(x.rooms || []).includes(room.id) ? "checked" : ""}> ${esc(room.name)}</label>`).join("")}</div>` : ""}
+        <label>Mode <select data-lo="${i}" data-field="mode">
+          ${["off", "log_only", "live"].map((k) => `<option value="${k}" ${k === x.mode ? "selected" : ""}>${MODE_LABEL[k]}</option>`).join("")}
+        </select><span class="help">Log only says what it would have done (on this page and in the logbook) and switches nothing, so it can run beside an automation it replaces.</span></label>
+        <div class="row">
+          <button class="btn tiny" data-action="lo-preview" data-row="${i}">Check now</button>
+          <button class="btn tiny danger" data-action="lo-remove" data-row="${i}">Remove</button>
+        </div>
+        ${x._preview ? `<div class="meta">If it ran now: ${esc(x._preview)}</div>` : ""}
+      </div>`;
+    return `
+      <div class="detailhead"><button class="btn small" data-action="lo-cancel"><ha-icon icon="mdi:arrow-left"></ha-icon> Back</button></div>
+      <div class="card form">
+        <h2 class="inline">Lights out</h2>
+        <p class="explain">Switch the house off at the end of the day, at a time, when a period starts or when something turns on (a bedtime switch). Once a room has gone off, motion works in it as usual. A new Lights out starts in log only.</p>
+        ${this._loError ? `<div class="warntext">${esc(this._loError)}</div>` : ""}
+        ${this._entityOptions()}
+        ${items.map(row).join("") || `<div class="meta">None.</div>`}
+        <div class="row"><button class="btn small" data-action="lo-add">Add a Lights out</button></div>
+        <div class="row">
+          <button class="btn primary" data-action="lo-save">Save</button>
+          <button class="btn" data-action="lo-cancel">Cancel</button>
+        </div>
+      </div>`;
+  }
+
+  _cleanLightsOut(x) {
+    const out = { name: (x.name || "").trim() || "Lights out", when: x.when, days: x.days || "every_day", style: x.style || "once_empty", mode: x.mode || "log_only" };
+    if (x.id) out.id = x.id;
+    if (x.when === "time") out.at = x.at || "";
+    if (x.when === "period") out.period = x.period;
+    if (x.when === "entity") {
+      out.entity = (x.entity || "").trim();
+      out.state = (x.state || "on").trim();
+    }
+    if (out.days === "days") out.weekdays = [...(x.weekdays || [])].sort();
+    if ((x.rooms || []).length) out.rooms = [...x.rooms];
+    return out;
+  }
+
   _houseRulesForm() {
     const d = this._data;
     const rules = this._houseRulesDraft.rules;
@@ -1394,7 +1509,7 @@ class RoomRoutinesPanel extends HTMLElement {
         this._tab = b.dataset.tab;
         savePref("tab", this._tab);
         this._roomId = null;
-        this._editLook = this._roomDraft = this._periodDraft = this._tracksDraft = this._scenePick = this._houseRulesDraft = null;
+        this._editLook = this._roomDraft = this._periodDraft = this._tracksDraft = this._scenePick = this._houseRulesDraft = this._loDraft = null;
         this._notice = null;
         this._render();
       })
@@ -1529,6 +1644,39 @@ class RoomRoutinesPanel extends HTMLElement {
         const m = Number(el.value);
         if (m > 0) this._roomDraft.blends[el.dataset.blend] = m;
         else delete this._roomDraft.blends[el.dataset.blend];
+      })
+    );
+    root.querySelectorAll("[data-lo]").forEach((el) =>
+      el.addEventListener("change", () => {
+        const x = this._loDraft.items[Number(el.dataset.lo)];
+        x[el.dataset.field] = el.value;
+        x._preview = null;
+        if (el.dataset.rerender !== undefined) this._render();
+      })
+    );
+    root.querySelectorAll("[data-lo-day]").forEach((el) =>
+      el.addEventListener("change", () => {
+        const x = this._loDraft.items[Number(el.dataset.loDay)];
+        const day = Number(el.dataset.day);
+        x.weekdays = (x.weekdays || []).filter((w) => w !== day);
+        if (el.checked) x.weekdays.push(day);
+      })
+    );
+    root.querySelectorAll("[data-lo-whole]").forEach((el) =>
+      el.addEventListener("change", () => {
+        const x = this._loDraft.items[Number(el.dataset.loWhole)];
+        x._chosen = !el.checked;
+        if (el.checked) x.rooms = [];
+        x._preview = null;
+        this._render();
+      })
+    );
+    root.querySelectorAll("[data-lo-room]").forEach((el) =>
+      el.addEventListener("change", () => {
+        const x = this._loDraft.items[Number(el.dataset.loRoom)];
+        x.rooms = (x.rooms || []).filter((r) => r !== el.dataset.roomId);
+        if (el.checked) x.rooms.push(el.dataset.roomId);
+        x._preview = null;
       })
     );
     root.querySelectorAll("[data-timer]").forEach((el) =>
@@ -1885,6 +2033,51 @@ class RoomRoutinesPanel extends HTMLElement {
         (el.dataset.root === "house" ? this._houseRulesDraft.rules : this._roomDraft.rules).splice(Number(el.dataset.row), 1);
         this._render();
         return;
+      case "skip-lights-out":
+        await this._call("switch", el.checked ? "turn_on" : "turn_off", { entity_id: d.house.skip_entity });
+        return;
+      case "edit-lights-outs":
+        this._loDraft = { items: (d.house.lights_outs || []).map((x) => ({ ...x, weekdays: [...(x.weekdays || [])], rooms: [...(x.rooms || [])] })) };
+        this._loError = null;
+        this._entityList = null;
+        this._render();
+        return;
+      case "lo-add":
+        this._loDraft.items.push({ name: "Lights out", when: "time", at: "01:00", days: "every_day", weekdays: [], rooms: [], style: "once_empty", mode: "log_only" });
+        this._render();
+        return;
+      case "lo-remove":
+        this._loDraft.items.splice(Number(el.dataset.row), 1);
+        this._render();
+        return;
+      case "lo-cancel":
+        this._loDraft = null;
+        this._render();
+        return;
+      case "lo-preview": {
+        const x = this._loDraft.items[Number(el.dataset.row)];
+        const res = await this._ws({ type: "room_routines/lights_out_preview", lights_out: this._cleanLightsOut(x) });
+        x._preview = res.ok ? res.result.text : res.error;
+        this._render();
+        return;
+      }
+      case "lo-save": {
+        const items = this._loDraft.items;
+        if (items.some((x) => x.when === "time" && !x.at)) {
+          this._loError = "Every Lights out at a time needs the time.";
+          this._render();
+          return;
+        }
+        const res = await this._ws({ type: "room_routines/save_lights_outs", lights_outs: items.map((x) => this._cleanLightsOut(x)) }, "Saved the Lights outs.");
+        if (!res.ok) {
+          this._loError = res.error;
+          this._render();
+          return;
+        }
+        this._loDraft = null;
+        this._render();
+        return;
+      }
       case "edit-house-rules":
         this._houseRulesDraft = { rules: (d.house.house_rules || []).map((x) => ({ ...x, when: { ...x.when }, rooms: [...(x.rooms || [])] })) };
         this._houseRulesError = null;
@@ -2083,6 +2276,8 @@ const STYLES = `
   .pill.mode-live { background: color-mix(in srgb, var(--success-color, #43a047) 20%, var(--card-background-color)); border-color: var(--success-color, #43a047); }
   .pill.mode-log_only { background: color-mix(in srgb, var(--info-color, #039be5) 18%, var(--card-background-color)); border-color: var(--info-color, #039be5); }
   .pill.mode-off { opacity:.7; }
+  .logrow { padding:3px 0; border-top:1px solid var(--divider-color); }
+  input.short { width:6em; }
   .offrooms { margin-top:12px; }
   .offrooms summary { cursor:pointer; color: var(--secondary-text-color); font-size:14px; padding:8px 0; }
   .openrow { cursor:pointer; }
