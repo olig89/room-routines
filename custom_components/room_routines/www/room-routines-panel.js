@@ -7,7 +7,7 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.12.0";
+const PANEL_VERSION = "0.13.0";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
@@ -95,11 +95,54 @@ const minutes = (hm) => {
   return h * 60 + m;
 };
 
+// ---- light colours, for the Timeline ----
+// A light's colour from its colour temperature or RGB, shaded towards a dark
+// base by its brightness, so a nightlight reads as a dim amber and a full
+// Hue bar reads bright.
+function kelvinRgb(k) {
+  const t = k / 100;
+  let r, g, b;
+  if (t <= 66) { r = 255; g = 99.47 * Math.log(t) - 161.12; b = t <= 19 ? 0 : 138.52 * Math.log(t - 10) - 305.04; }
+  else { r = 329.7 * Math.pow(t - 60, -0.1332); g = 288.12 * Math.pow(t - 60, -0.0755); b = 255; }
+  return [r, g, b].map((v) => Math.max(0, Math.min(255, Math.round(v))));
+}
+const TL_BASE = [20, 18, 16];
+function tlShade(rgb, pct) {
+  const f = 0.22 + 0.78 * Math.sqrt(Math.max(1, Math.min(100, pct)) / 100);
+  return rgb.map((v, i) => Math.round(TL_BASE[i] + (v - TL_BASE[i]) * f));
+}
+const tlCss = (c) => `rgb(${c.join(",")})`;
+const tlInk = (c) => (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2] > 140 ? "#1b1712" : "#f3efe8");
+// The colours a look shows: one per distinct light colour (at most two), or null when it's dark.
+function tlColours(look) {
+  if (!look || look.kind === "nothing") return null;
+  if (look.kind === "scene" && !look.known) return [[150, 140, 128]];
+  const out = [];
+  for (const l of look.lights || []) {
+    if (!l.on) continue;
+    const base = l.rgb ? l.rgb : kelvinRgb(l.kelvin || 2900);
+    const c = tlShade(base, l.pct ?? 60);
+    if (!out.some((o) => o.every((v, i) => Math.abs(v - c[i]) < 18))) out.push(c);
+  }
+  return out.length ? out.slice(0, 2) : null;
+}
+const tlMid = (cs) => cs[0].map((_, i) => Math.round(cs.reduce((t, c) => t + c[i], 0) / cs.length));
+const tlPct = (m) => `${(m / 1440) * 100}%`;
+const tlTime = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+
 class RoomRoutinesPanel extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
     this._tab = loadPref("tab", "rooms");
+    if (this._tab === "day") this._tab = "timeline"; // Your day became the Timeline
+    this._tl = null; // the Timeline: lanes and today's history
+    this._tlAt = 0;
+    this._tlLoading = false;
+    this._tlError = null;
+    this._tlPop = null; // {room, lane, band}: the band tapped
+    this._tlShowOff = false;
+    this._dragging = null; // {kind, room, index} while a lane is dragged
     this._roomId = null; // room detail open
     this._editLook = null; // {room, period, draft}
     this._roomDraft = null; // settings: room being added or changed
@@ -149,10 +192,15 @@ class RoomRoutinesPanel extends HTMLElement {
       });
     }, 1000);
     if (this._hass && !this._unsub) this._subscribe();
+    // The Timeline's now line and history move on: fetch it again every minute while it's shown.
+    this._tlTicker = setInterval(() => {
+      if (this._tab === "timeline" && !this._editing()) this._loadTimeline();
+    }, 60000);
   }
 
   disconnectedCallback() {
     clearInterval(this._ticker);
+    clearInterval(this._tlTicker);
     if (this._unsub) {
       this._unsub.then((u) => u()).catch(() => {});
       this._unsub = null;
@@ -178,7 +226,7 @@ class RoomRoutinesPanel extends HTMLElement {
   }
 
   _editing() {
-    return !!(this._editLook || this._roomDraft || this._periodDraft || this._tracksDraft || this._scenePick || this._houseRulesDraft || this._loDraft);
+    return !!(this._editLook || this._roomDraft || this._periodDraft || this._tracksDraft || this._scenePick || this._houseRulesDraft || this._loDraft || this._dragging);
   }
 
   get _admin() {
@@ -286,7 +334,7 @@ class RoomRoutinesPanel extends HTMLElement {
       </div>
       <div class="tabs">
         <button class="tab ${this._tab === "rooms" ? "on" : ""}" data-tab="rooms">Status</button>
-        <button class="tab ${this._tab === "day" ? "on" : ""}" data-tab="day">Your day</button>
+        <button class="tab ${this._tab === "timeline" ? "on" : ""}" data-tab="timeline">Timeline</button>
         ${admin ? `<button class="tab ${this._tab === "settings" ? "on" : ""}" data-tab="settings">Settings</button>` : ""}
       </div>
       <div class="content">
@@ -392,7 +440,7 @@ class RoomRoutinesPanel extends HTMLElement {
   }
 
   _body(d) {
-    if (this._tab === "day") return this._day(d);
+    if (this._tab === "timeline") return this._timeline(d);
     if (this._tab === "settings") return this._settings(d);
     const room = this._roomId && d.rooms.find((r) => r.id === this._roomId);
     if (room) return this._detail(d, room);
@@ -860,53 +908,205 @@ class RoomRoutinesPanel extends HTMLElement {
 
   // ---- your day ----
 
-  _day(d) {
-    const periods = d.house.periods;
-    const bands = (alt) => {
-      const starts = periods
-        .map((p) => ({ name: p.name, m: minutes(alt && p.alt_start ? p.alt_start : p.start) }))
-        .sort((a, b) => a.m - b.m);
-      const out = [];
-      // The last period of the day runs on past midnight into the first.
-      const lastName = starts[starts.length - 1].name;
-      if (starts[0].m > 0) out.push({ name: lastName, from: 0, to: starts[0].m });
-      starts.forEach((s, i) => out.push({ name: s.name, from: s.m, to: i + 1 < starts.length ? starts[i + 1].m : 1440 }));
-      return out;
+  // ---- the Timeline ----
+
+  async _loadTimeline() {
+    if (this._tlLoading) return;
+    this._tlLoading = true;
+    try {
+      this._tl = await this._hass.callWS({ type: "room_routines/timeline" });
+      this._tlError = null;
+    } catch (err) {
+      this._tlError = err.message || String(err);
+    }
+    this._tlAt = Date.now();
+    this._tlLoading = false;
+    if (this._tab === "timeline" && !this._editing()) this._render();
+  }
+
+  _timeline(d) {
+    if (!this._tlLoading && Date.now() - this._tlAt > 60000) this._loadTimeline();
+    const tl = this._tl;
+    if (!tl) return this._tlError ? `<div class="card warn">Couldn't load the Timeline: ${esc(this._tlError)}</div>` : `<div class="card">Loading the Timeline…</div>`;
+    const rooms = tl.rooms.map((r) => ({ ...r, snap: d.rooms.find((x) => x.id === r.id) }));
+    const live = rooms.filter((r) => r.group !== "off");
+    const off = rooms.filter((r) => r.group === "off");
+    const group = (key, title, sub) => {
+      const list = live.filter((r) => r.group === key).sort((a, b) => (a.area_name || "~").localeCompare(b.area_name || "~") || a.name.localeCompare(b.name));
+      if (!list.length) return "";
+      const shared = {};
+      list.forEach((r) => { if (r.area_id) shared[r.area_id] = (shared[r.area_id] || 0) + 1; });
+      let lastArea = null;
+      const body = list.map((r) => {
+        let head = "";
+        if (r.area_id && shared[r.area_id] > 1 && r.area_id !== lastArea) head = `<div class="tl-area">${esc(r.area_name)}</div>`;
+        lastArea = r.area_id;
+        return head + this._tlRoom(tl, r);
+      }).join("");
+      return `<div class="tl-group"><div class="tl-grouphead"><h3>${title}</h3><span class="meta">${list.length} room${list.length === 1 ? "" : "s"} · ${sub}</span></div>${this._tlHours()}${body}</div>`;
     };
-    const now = new Date();
-    const nowM = now.getHours() * 60 + now.getMinutes();
-    const todayAlt = d.house.alt_days.includes((now.getDay() + 6) % 7);
-    const bar = (alt, label) => `
-      <div class="daylabel">${esc(label)}</div>
-      <div class="daybar">
-        ${bands(alt).map((b) => `<div class="band" style="left:${(b.from / 1440) * 100}%;width:${((b.to - b.from) / 1440) * 100}%;background:${this._periodColour(b.name)}" title="${esc(b.name)}"><span>${b.to - b.from > 70 ? esc(b.name) : ""}</span></div>`).join("")}
-        ${alt === todayAlt ? `<div class="nowline" style="left:${(nowM / 1440) * 100}%" title="Now"></div>` : ""}
-      </div>`;
-    const hours = [0, 3, 6, 9, 12, 15, 18, 21, 24].map((h) => `<span style="left:${(h / 24) * 100}%">${String(h).padStart(2, "0")}</span>`).join("");
-    const altNames = d.house.alt_days.map((i) => WEEKDAYS[i]).join(", ");
-    const t = d.house.tracks;
-    const trackCard = t?.enabled
-      ? `<div class="card">${this._darkDaySummary(d.house)}</div>`
-      : "";
     return `
-      ${trackCard}
-      <div class="card">
-        ${bar(false, d.house.alt_days.length ? "Most days" : "Every day")}
-        ${d.house.alt_days.length ? bar(true, altNames) : ""}
-        <div class="hours">${hours}</div>
-      </div>
-      <div class="card">
-        <table class="plain">
-          <tr><th>Period</th><th>Starts</th>${d.house.alt_days.length ? `<th>On ${esc(altNames)}</th>` : ""}</tr>
-          ${d.house.order
-            .map((name) => {
-              const p = periods.find((x) => x.name === name);
-              return `<tr class="${name === d.house.period ? "nowrow" : ""}"><td><span class="dot" style="background:${this._periodColour(name)}"></span>${esc(name)}</td><td>${esc(p.start)}</td>${d.house.alt_days.length ? `<td>${esc(p.alt_start || p.start)}</td>` : ""}</tr>`;
-            })
-            .join("")}
-        </table>
-        ${this._admin ? `<div class="row"><button class="btn small" data-action="edit-periods">Change the periods</button></div>` : ""}
-      </div>`;
+      ${this._tlToday(d, tl)}
+      ${group("someone", "On when someone's there", "dark until someone comes in")}
+      ${group("allday", "All-day routines", "on through the day once started")}
+      ${off.length ? `<div class="tl-off">${off.length} room${off.length === 1 ? " isn't" : "s aren't"} set up${this._tlShowOff ? `: ${off.map((r) => `<a href="#" data-tl-open="${esc(r.id)}">${esc(r.name)}</a>`).join(", ")}` : ""}. <a href="#" data-tl-showoff>${this._tlShowOff ? "Hide" : "Show"}</a></div>` : ""}
+      ${this._tlLegend()}`;
+  }
+
+  _tlHours() {
+    return `<div class="tl-row"><div class="tl-label"></div><div class="tl-ruler">${[0, 3, 6, 9, 12, 15, 18, 21, 24].map((h) => `<span style="left:${(h / 24) * 100}%">${String(h).padStart(2, "0")}</span>`).join("")}</div></div>`;
+  }
+
+  _tlToday(d, tl) {
+    const date = new Date(tl.date + "T12:00:00");
+    const day = date.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" });
+    const t = d.house.tracks;
+    const trackPill = t?.enabled ? `<span class="pill ${d.house.track === "dim" ? "" : "grey"}">${esc(TRACK_LABEL[d.house.track] || d.house.track)}${t.active ? "" : " · not a Dark Day period"}</span>` : "";
+    const bars = tl.periods.map((p) => `<div class="band" style="left:${tlPct(p.start)};width:${tlPct(p.end - p.start)};background:${this._periodColour(p.name)}" title="${esc(p.name)} ${tlTime(p.start)}"><span>${p.end - p.start > 90 ? esc(p.name) : ""}</span></div>`).join("");
+    const los = tl.lights_outs.filter((lo) => lo.minute != null);
+    const marks = [
+      ...tl.periods.filter((p) => p.start > 0).map((p) => `<span style="left:${tlPct(p.start)}">${tlTime(p.start)}</span>`),
+      tl.sunrise != null ? `<span style="left:${tlPct(tl.sunrise)}" title="Sunrise">☀ ${tlTime(tl.sunrise)}</span>` : "",
+      tl.sunset != null ? `<span style="left:${tlPct(tl.sunset)}" title="Sunset">☾ ${tlTime(tl.sunset)}</span>` : "",
+    ].join("");
+    const darkSpans = tl.periods.filter((p) => tl.dark_periods.includes(p.name));
+    const loText = tl.lights_outs.map((lo) => `<b>${esc(lo.name)}</b> ${esc(lo.text)}${lo.mode === "log_only" ? " (log only)" : ""}`).join(" · ");
+    return `<div class="card tl-today">
+      <div class="tl-todayline"><b>${esc(day)}</b><span class="pill ${tl.workday ? "" : "grey"}">${tl.workday ? "Workday" : "Day off"}</span>${trackPill}<span class="meta">Now: ${esc(d.house.period)}, ${esc(d.house.next_period)} from ${esc(hhmm(d.house.next_start))}</span></div>
+      <div class="tl-row"><div class="tl-label">House periods</div><div>
+        <div class="daybar">${bars}${los.map((lo) => `<div class="tl-lo" style="left:${tlPct(lo.minute)}" title="${esc(lo.name)}"></div>`).join("")}<div class="nowline" style="left:${tlPct(tl.now)}" title="Now"></div></div>
+        <div class="tl-marks">${marks}</div>
+      </div></div>
+      ${darkSpans.length ? `<div class="tl-row"><div class="tl-label">Dark Day possible</div><div><div class="tl-strip">${darkSpans.map((p) => `<div style="left:${tlPct(p.start)};width:${tlPct(p.end - p.start)}"></div>`).join("")}</div></div></div>` : ""}
+      <div class="meta">${loText ? `${loText}${tl.skip_next ? ` · <b>skipped tonight</b>` : ""}. ` : ""}${t?.enabled ? "" : "Dark Days are off. "}</div>
+      ${t?.enabled ? `<details data-pref="tl-readings"${loadPref("tl-readings", false) ? " open" : ""}><summary>Dark Day readings</summary>${this._darkDaySummary(d.house)}</details>` : ""}
+      ${this._admin ? `<div class="row"><button class="btn small" data-action="edit-periods">Change the periods</button></div>` : ""}
+    </div>`;
+  }
+
+  _tlRoom(tl, r) {
+    const snap = r.snap;
+    const s = snap?.settings || {};
+    const bits = [];
+    if ((s.triggers || []).length || (s.holds || []).length) {
+      bits.push(`${(s.triggers || []).map((e) => esc(this._name(e))).join(" or ") || "no trigger"}${(s.holds || []).length ? `, held by ${(s.holds || []).map((e) => esc(this._name(e))).join(", ")}` : ""}`);
+      if (r.group === "someone") bits.push(`off ${s.timeout_s >= 60 ? `${Math.round(s.timeout_s / 60)} min` : `${s.timeout_s} s`} after the last movement`);
+      if (s.threshold_lux != null) bits.push(`only below ${s.threshold_lux} lx`);
+    }
+    for (const t of s.timers || []) bits.push(esc(this._timerText(t)));
+    if (r.lights_out != null) bits.push(`off at Lights out ${tlTime(r.lights_out)}`);
+    const lanes = r.lanes.map((lane, i) => this._tlLane(tl, r, lane, i)).join("");
+    return `<div class="tl-room">
+      <div class="tl-roomhead"><a href="#" class="roomname" data-tl-open="${esc(r.id)}">${esc(r.name)}</a>${r.mode === "log_only" ? `<span class="badge dry">dry run</span>` : ""}<span class="meta">${bits.join(" · ")}</span></div>
+      ${r.lanes.some((l) => l.key === "base") && r.own_periods ? this._tlPeriods(r.own_periods) : ""}
+      ${lanes}
+    </div>`;
+  }
+
+  _tlPeriods(periods) {
+    return `<div class="tl-row"><div class="tl-label"></div><div class="tl-prd">${periods.map((p) => `<div style="left:${tlPct(p.start)};width:${tlPct(p.end - p.start)}">${esc(p.name)}</div>`).join("")}</div></div>`;
+  }
+
+  _tlColourAt(lane, minute) {
+    const b = lane.bands.find((x) => x.start <= minute && minute < x.end);
+    const cs = b ? tlColours(b.look) : null;
+    return cs ? tlMid(cs) : null;
+  }
+
+  _tlLane(tl, r, lane, li) {
+    const tlNow = tl.now;
+    const hist = r.history || {};
+    const reorder = { rule: "rules", house_rule: "house_rules", inform: "signals" }[lane.key];
+    const can = this._admin && reorder && lane.index != null;
+    let inner = "";
+    lane.bands.forEach((b, bi) => {
+      const cs = tlColours(b.look);
+      if (!cs) return;
+      const c = tlMid(cs);
+      let bg;
+      if (b.blend_to) {
+        const to = tlColours(b.blend_to);
+        bg = `linear-gradient(90deg, ${tlCss(c)}, ${tlCss(to ? tlMid(to) : c)})`;
+      } else if (cs.length > 1) {
+        bg = `linear-gradient(180deg, ${tlCss(cs[0])} 0 50%, ${tlCss(cs[1])} 50% 100%)`;
+      } else if (b.visit) {
+        bg = `repeating-linear-gradient(135deg, ${tlCss(c)} 0 7px, color-mix(in srgb, ${tlCss(c)} 35%, transparent) 7px 11px)`;
+      } else bg = tlCss(c);
+      const w = ((b.end - b.start) / 1440) * 100;
+      const label = w > 9 ? `<span>${esc(b.look.name)}${b.cap != null ? ` ≤${b.cap} %` : ""}</span>` : "";
+      inner += `<button class="tl-seg${lane.key === "rule" || lane.key === "house_rule" ? " alt" : ""}" style="left:${tlPct(b.start)};width:${w}%;background:${bg};color:${tlInk(c)}" data-tl-band="${esc(r.id)}|${li}|${bi}" title="${tlTime(b.start)}–${tlTime(b.end)} · ${esc(b.look.name)}" aria-label="${esc(lane.label)}, ${tlTime(b.start)} to ${tlTime(b.end)}: ${esc(b.look.name)}">${label}</button>`;
+    });
+    if (lane.key === "inform") {
+      const cs = tlColours(lane.look);
+      const c = cs ? tlCss(tlMid(cs)) : "var(--secondary-text-color)";
+      inner += `<div class="tl-inform" style="--c:${c}"></div>`;
+      for (const [a, b] of (hist.held || {})[`inform:${lane.index}`] || []) inner += `<div class="tl-visit" style="left:${tlPct(a)};width:max(3px, ${tlPct(b - a)});background:${c}" title="${tlTime(a)}–${tlTime(b)} · ${esc(lane.label)}"></div>`;
+    }
+    if (lane.key === "rule" || lane.key === "house_rule") {
+      for (const [a, b] of (hist.held || {})[`${lane.key}:${lane.index}`] || []) inner += `<div class="tl-held" style="left:${tlPct(a)};width:max(3px, ${tlPct(b - a)})" title="${tlTime(a)}–${tlTime(b)} · held"></div>`;
+    }
+    if (lane.key === "base" && lane.today) {
+      for (const [a, b, owned] of hist.on || []) {
+        const c = owned ? this._tlColourAt(lane, Math.floor((a + b) / 2)) : null;
+        inner += `<div class="tl-visit" style="left:${tlPct(a)};width:max(3px, ${tlPct(b - a)});background:${c ? tlCss(c) : "var(--secondary-text-color)"}" title="${tlTime(a)}–${tlTime(b)} · ${owned ? "on" : "on, switched another way"}"></div>`;
+      }
+      for (const [a, b] of hist.hand || []) inner += `<div class="tl-hand" style="left:${tlPct(a)};width:max(3px, ${tlPct(b - a)})" title="${tlTime(a)}–${tlTime(b)} · left as set by hand"></div>`;
+    }
+    const lo = r.lights_out != null ? `<div class="tl-lo" style="left:${tlPct(r.lights_out)}" title="Lights out"></div>` : "";
+    const overlay = `${lo}<div class="tl-past" style="width:${tlPct(tlNow)}"></div><div class="tl-now" style="left:${tlPct(tlNow)}"></div>`;
+    const handle = can ? `<span class="tl-handle" title="Drag to change the priority" aria-hidden="true">⠿</span><button class="tl-move" data-tl-move="up" data-tl-kind="${reorder}" data-room="${esc(r.id)}" data-index="${lane.index}" aria-label="Higher priority">▲</button><button class="tl-move" data-tl-move="down" data-tl-kind="${reorder}" data-room="${esc(r.id)}" data-index="${lane.index}" aria-label="Lower priority">▼</button>` : "";
+    const kindTag = lane.key === "house_rule" ? `<small class="muted">house rule</small>` : lane.key === "inform" ? `<small class="muted">Inform</small>` : "";
+    const pop = this._tlPop && this._tlPop.room === r.id && this._tlPop.lane === li ? this._tlPopCard(r, lane, lane.bands[this._tlPop.band]) : "";
+    return `<div class="tl-row${can ? " tl-drag" : ""}" ${can ? `draggable="true" data-tl-kind="${reorder}" data-room="${esc(r.id)}" data-index="${lane.index}"` : ""}>
+        <div class="tl-label">${handle}<span>${esc(lane.label)}</span>${kindTag}</div>
+        <div><div class="tl-lane${lane.key === "inform" || lane.key === "someone" ? " thin" : ""}">${inner}${overlay}</div>${lane.note ? `<div class="tl-note">${esc(lane.note)}</div>` : ""}</div>
+      </div>${pop}`;
+  }
+
+  _tlPopCard(r, lane, band) {
+    if (!band) return "";
+    const look = band.look || {};
+    const rows = (look.lights || []).map((l) => `<tr><td>${esc(l.name)}</td><td>${l.on ? (l.pct != null ? `${l.pct} %` : "last brightness") + (l.kelvin ? ` · ${l.kelvin} K` : l.rgb ? ` · <span class="tl-dot" style="background:rgb(${l.rgb.join(",")})"></span>` : "") : "off"}</td></tr>`).join("");
+    const how = band.blend_to ? `Blending into ${esc(band.blend_period)}'s look (${esc(band.blend_to.name)}).` : band.visit ? "While someone's there." : "On through this time while the routine runs.";
+    return `<div class="tl-row"><div></div><div class="tl-pop" role="note">
+      <div class="eyebrow">${esc(r.name)} · ${esc(lane.label)} · ${esc(band.period || "")} ${tlTime(band.start)}–${tlTime(band.end)}</div>
+      <div><b>${esc(look.name)}</b> <span class="meta">${look.kind === "scene" ? "scene" : look.kind === "nothing" ? "" : "look"}${band.track === "dim" ? " · Dark Day" : ""}${band.cap != null ? ` · no brighter than ${band.cap} %` : ""}</span></div>
+      ${look.kind === "scene" && !look.known ? `<div class="meta">A scene from another app: its settings can't be read.</div>` : rows ? `<table>${rows}</table>` : ""}
+      <div class="meta">${how}</div>
+      <div class="row"><button class="btn small" data-tl-open="${esc(r.id)}">Open the room</button> <button class="btn small" data-tl-close>Close</button></div>
+    </div></div>`;
+  }
+
+  _tlLegend() {
+    const sw = (bg, extra = "") => `<div class="tl-sw" style="background:${bg}">${extra}</div>`;
+    const warm = tlShade(kelvinRgb(2700), 50);
+    return `<details class="tl-legend" data-pref="tl-legend"${loadPref("tl-legend", true) ? " open" : ""}><summary>How to read it</summary><div class="tl-legendgrid">${[
+      [sw(`repeating-linear-gradient(135deg, ${tlCss(warm)} 0 7px, color-mix(in srgb, ${tlCss(warm)} 35%, transparent) 7px 11px)`), "Striped: what a visit gets. The room is dark until someone comes in."],
+      [sw(tlCss(warm)), "Solid: on through the day, as an all-day routine."],
+      [sw(`linear-gradient(90deg, ${tlCss(tlShade(kelvinRgb(2200), 5))}, ${tlCss(warm)})`), "Gradient: blending into the next period's look."],
+      [sw("var(--card-background-color)", `<div class="tl-visit" style="left:30%;width:25%;background:${tlCss(warm)}"></div>`), "Block: when the lights were really on today (grey: switched on another way)."],
+      [sw("var(--card-background-color)", `<div class="tl-hand" style="left:25%;width:40%"></div>`), "Orange stripes: a light left as someone set it by hand."],
+      [sw("var(--card-background-color)", `<div class="tl-held" style="left:20%;width:50%"></div>`), "Underline on a rule's lane: when that rule held today."],
+      [sw("var(--card-background-color)", `<div class="tl-lo" style="left:50%"></div>`), "Dashed line: Lights out."],
+      [sw("var(--card-background-color)", `<div class="tl-now" style="left:50%"></div><div class="tl-past" style="width:50%"></div>`), "Line: now. Left of it is today so far."],
+    ].map(([a, b]) => `<div>${a}<div>${b}</div></div>`).join("")}</div>
+    <p class="explain">Rules and Informs are listed in priority order: the first one that holds wins. ${this._admin ? "Drag a lane, or use its arrows, to change the order." : ""}</p></details>`;
+  }
+
+  async _tlReorder(kind, roomId, from, to) {
+    const d = this._data;
+    const room = d.rooms.find((r) => r.id === roomId);
+    const list = kind === "house_rules" ? d.house.house_rules || [] : (room?.settings?.[kind] || []);
+    const order = list.map((_, i) => i);
+    const pos = order.indexOf(from);
+    if (pos < 0 || to < 0 || to >= order.length || from === to) return;
+    order.splice(pos, 1);
+    order.splice(order.indexOf(to) + (to > from ? 1 : 0), 0, from);
+    const res = await this._ws({ type: "room_routines/reorder", kind, order, ...(kind === "house_rules" ? {} : { room_id: roomId }) }, "Saved the new order.");
+    if (!res.ok) this._notice = { text: res.error, bad: true };
+    this._tl = null;
+    this._tlAt = 0;
+    this._render();
   }
 
   // ---- settings (admins) ----
@@ -1507,6 +1707,56 @@ class RoomRoutinesPanel extends HTMLElement {
         this._render();
       })
     );
+    // Timeline
+    root.querySelectorAll("[data-tl-band]").forEach((el) =>
+      el.addEventListener("click", () => {
+        const [room, lane, band] = el.dataset.tlBand.split("|");
+        const same = this._tlPop && this._tlPop.room === room && this._tlPop.lane === Number(lane) && this._tlPop.band === Number(band);
+        this._tlPop = same ? null : { room, lane: Number(lane), band: Number(band) };
+        this._render();
+      })
+    );
+    root.querySelectorAll("[data-tl-close]").forEach((el) => el.addEventListener("click", () => { this._tlPop = null; this._render(); }));
+    root.querySelectorAll("[data-tl-open]").forEach((el) =>
+      el.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        this._tab = "rooms";
+        this._roomId = el.dataset.tlOpen;
+        this._tlPop = null;
+        this._render();
+      })
+    );
+    root.querySelectorAll("[data-tl-showoff]").forEach((el) => el.addEventListener("click", (ev) => { ev.preventDefault(); this._tlShowOff = !this._tlShowOff; this._render(); }));
+    root.querySelectorAll("[data-tl-move]").forEach((el) =>
+      el.addEventListener("click", () => {
+        const rows = [...root.querySelectorAll(`.tl-drag[data-tl-kind="${el.dataset.tlKind}"][data-room="${el.dataset.room}"]`)].map((x) => Number(x.dataset.index));
+        const i = rows.indexOf(Number(el.dataset.index));
+        const j = el.dataset.tlMove === "up" ? i - 1 : i + 1;
+        if (j < 0 || j >= rows.length) return;
+        this._tlReorder(el.dataset.tlKind, el.dataset.room, rows[i], rows[j]);
+      })
+    );
+    root.querySelectorAll(".tl-drag").forEach((el) => {
+      el.addEventListener("dragstart", (ev) => {
+        this._dragging = { kind: el.dataset.tlKind, room: el.dataset.room, index: Number(el.dataset.index) };
+        el.classList.add("dragging");
+        ev.dataTransfer.effectAllowed = "move";
+        try { ev.dataTransfer.setData("text/plain", el.dataset.index); } catch (e) { /* some browsers refuse custom data */ }
+      });
+      el.addEventListener("dragend", () => { el.classList.remove("dragging"); this._dragging = null; });
+      el.addEventListener("dragover", (ev) => {
+        const g = this._dragging;
+        if (g && g.kind === el.dataset.tlKind && g.room === el.dataset.room) { ev.preventDefault(); el.classList.add("dropto"); }
+      });
+      el.addEventListener("dragleave", () => el.classList.remove("dropto"));
+      el.addEventListener("drop", (ev) => {
+        ev.preventDefault();
+        el.classList.remove("dropto");
+        const g = this._dragging;
+        this._dragging = null;
+        if (g && g.kind === el.dataset.tlKind && g.room === el.dataset.room) this._tlReorder(g.kind, g.room, g.index, Number(el.dataset.index));
+      });
+    });
     root.querySelectorAll("[data-open]").forEach((el) => {
       const open = (ev) => {
         if (ev.target.closest("[data-stop]")) return;
@@ -2214,7 +2464,8 @@ class RoomRoutinesPanel extends HTMLElement {
           return;
         }
         this._periodDraft = null;
-        this._tab = "day";
+        this._tab = "timeline";
+        this._tl = null;
         this._render();
         return;
       }
@@ -2223,6 +2474,64 @@ class RoomRoutinesPanel extends HTMLElement {
 }
 
 const STYLES = `
+  .tl-today { display:grid; gap:10px; }
+  .pill.grey { background:transparent; }
+  .badge { font-size:11px; font-weight:600; padding:2px 7px; border-radius:999px; border:1px solid var(--divider-color); color: var(--secondary-text-color); }
+  .badge.dry { border-color: var(--warning-color, #e08a00); color: var(--warning-color, #e08a00); }
+  .tl-todayline { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:baseline; }
+  .tl-todayline b { font-size:1.1em; }
+  .tl-group { margin-top:22px; }
+  .tl-grouphead { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:baseline; border-bottom:1px solid var(--divider-color); padding-bottom:6px; }
+  .tl-grouphead h3 { margin:0; font-size:1.05em; }
+  .tl-area { margin-top:18px; font-size:11px; letter-spacing:.08em; text-transform:uppercase; color: var(--secondary-text-color); }
+  .tl-room { margin-top:12px; display:grid; gap:4px; }
+  .tl-roomhead { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; }
+  .tl-roomhead .roomname { font-weight:600; color: var(--primary-text-color); text-decoration:none; }
+  .tl-roomhead .roomname:hover, .tl-roomhead .roomname:focus-visible { text-decoration:underline; }
+  .tl-row { display:grid; grid-template-columns:9.5rem minmax(0,1fr); gap:10px; align-items:center; }
+  .tl-row.dragging { opacity:.5; }
+  .tl-row.dropto .tl-lane { outline:2px dashed var(--primary-color); outline-offset:2px; }
+  .tl-label { font-size:13px; color: var(--secondary-text-color); text-align:right; line-height:1.2; display:flex; gap:4px; justify-content:flex-end; align-items:center; flex-wrap:wrap; min-width:0; }
+  .tl-label small { flex-basis:100%; }
+  .tl-handle { cursor:grab; color: var(--secondary-text-color); }
+  .tl-move { border:0; background:none; color: var(--secondary-text-color); cursor:pointer; font-size:10px; padding:2px; }
+  .tl-move:focus-visible { outline:2px solid var(--primary-color); }
+  .tl-lane { position:relative; height:30px; border-radius:6px; overflow:hidden; background: repeating-linear-gradient(135deg, transparent 0 5px, var(--divider-color) 5px 6px); }
+  .tl-lane.thin { height:14px; }
+  .tl-seg { position:absolute; top:0; bottom:0; display:flex; align-items:center; padding:0 6px; font:600 11.5px/1 inherit; white-space:nowrap; overflow:hidden; border:0; cursor:pointer; }
+  .tl-seg.alt { opacity:.75; }
+  .tl-seg:focus-visible { outline:2px solid var(--primary-color); outline-offset:-2px; z-index:6; }
+  .tl-seg span { overflow:hidden; text-overflow:ellipsis; }
+  .tl-inform { position:absolute; inset:0; background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--c) 30%, transparent) 0 5px, transparent 5px 9px); }
+  .tl-visit { position:absolute; z-index:3; top:-1px; bottom:-1px; border-radius:2px; box-shadow:0 0 0 1px rgba(0,0,0,.25); pointer-events:none; }
+  .tl-hand { position:absolute; z-index:3; top:0; bottom:0; background: repeating-linear-gradient(45deg, var(--warning-color, #e08a00) 0 3px, transparent 3px 7px); box-shadow: inset 0 0 0 1px var(--warning-color, #e08a00); pointer-events:none; }
+  .tl-held { position:absolute; z-index:3; bottom:0; height:4px; background: var(--primary-text-color); border-radius:2px; pointer-events:none; }
+  .tl-lo { position:absolute; top:-3px; bottom:-3px; width:0; border-left:2px dashed var(--success-color, #2e7d5b); z-index:4; pointer-events:none; }
+  .tl-now { position:absolute; top:-3px; bottom:-3px; width:2px; background: var(--error-color, #d23c2c); z-index:5; pointer-events:none; }
+  .tl-past { position:absolute; top:0; bottom:0; left:0; background: var(--card-background-color); opacity:.45; z-index:2; pointer-events:none; }
+  .tl-note { font-size:12.5px; color: var(--secondary-text-color); margin-top:2px; }
+  .tl-ruler, .tl-marks { position:relative; height:18px; font-size:10.5px; color: var(--secondary-text-color); font-variant-numeric: tabular-nums; }
+  .tl-ruler span, .tl-marks span { position:absolute; transform:translateX(-50%); white-space:nowrap; }
+  .tl-prd { position:relative; height:20px; }
+  .tl-prd div { position:absolute; top:3px; bottom:3px; border-left:2px solid var(--divider-color); padding-left:5px; font-size:11px; line-height:14px; color: var(--secondary-text-color); white-space:nowrap; overflow:hidden; }
+  .tl-strip { position:relative; height:8px; border:1px solid var(--divider-color); border-radius:4px; overflow:hidden; }
+  .tl-strip div { position:absolute; top:0; bottom:0; background: color-mix(in srgb, var(--primary-color) 25%, transparent); }
+  .tl-off { margin-top:22px; border:1px dashed var(--divider-color); border-radius:10px; padding:10px 14px; color: var(--secondary-text-color); font-size:14px; }
+  .tl-off a, .tl-pop a { color: var(--primary-color); }
+  .tl-pop { margin:4px 0 8px; max-width:24rem; background: var(--card-background-color); border:1px solid var(--divider-color); border-radius:12px; padding:12px 14px; box-shadow:0 8px 24px rgba(0,0,0,.15); font-size:14px; display:grid; gap:6px; }
+  .tl-pop table { border-collapse:collapse; width:100%; }
+  .tl-pop td { padding:2px 0; }
+  .tl-pop td:last-child { text-align:right; font-variant-numeric: tabular-nums; }
+  .tl-dot { display:inline-block; width:10px; height:10px; border-radius:50%; vertical-align:middle; }
+  .tl-legend { margin-top:20px; }
+  .tl-legendgrid { display:grid; grid-template-columns:repeat(auto-fit, minmax(15rem, 1fr)); gap:10px 18px; margin-top:10px; }
+  .tl-legendgrid > div { display:grid; grid-template-columns:56px minmax(0,1fr); gap:10px; align-items:center; font-size:13px; }
+  .tl-sw { height:20px; border-radius:4px; position:relative; overflow:hidden; border:1px solid var(--divider-color); }
+  @media (max-width: 640px) {
+    .tl-row { grid-template-columns:minmax(0,1fr); gap:2px; }
+    .tl-label { justify-content:flex-start; text-align:left; }
+    .tl-seg span { display:none; }
+  }
   :host { display:block; background: var(--primary-background-color); min-height:100vh; color: var(--primary-text-color); font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif); }
   .toolbar { display:flex; align-items:center; gap:12px; height:56px; padding:0 8px; background: var(--app-header-background-color, var(--primary-color)); color: var(--app-header-text-color, #fff); }
   .toolbar .title { font-size:20px; flex:1; }

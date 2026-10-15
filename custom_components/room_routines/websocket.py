@@ -44,6 +44,7 @@ from .settings import (
     set_look,
     set_house_rules,
     set_lights_outs,
+    reorder,
     set_periods,
     set_tracks,
     unhide_area,
@@ -64,6 +65,8 @@ def async_register_websocket(hass: HomeAssistant) -> None:
         ws_save_tracks,
         ws_save_house_rules,
         ws_save_lights_outs,
+        ws_timeline,
+        ws_reorder,
         ws_lights_out_preview,
         ws_scene_draft,
         ws_dismiss,
@@ -603,6 +606,44 @@ def ws_lights_out_preview(hass: HomeAssistant, connection: websocket_api.ActiveC
         return
     plan = house.lights_out_plan(lights_out)
     connection.send_result(msg["id"], {**plan, "text": house.plan_text(plan, live=False, log_only=False)})
+
+
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/timeline"})
+@websocket_api.async_response
+async def ws_timeline(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Every room's lanes for today, with today's history so far."""
+    house = _house(hass)
+    if house is None:
+        connection.send_error(msg["id"], "not_set_up", "Room Routines isn't set up")
+        return
+    from .timeline import timeline_data
+
+    connection.send_result(msg["id"], await timeline_data(hass, house))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/reorder",
+        vol.Required("kind"): vol.In(["rules", "signals", "house_rules"]),
+        vol.Required("order"): [vol.Coerce(int)],
+        vol.Optional("room_id"): str,
+    }
+)
+@websocket_api.require_admin
+@callback
+def ws_reorder(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Put a room's rules or Informs, or the house rules, in a new priority order."""
+    house = _house(hass)
+    if house is None:
+        connection.send_error(msg["id"], "not_set_up", "Room Routines isn't set up")
+        return
+    try:
+        options = reorder(house.entry.options, msg["kind"], msg["order"], msg.get("room_id"))
+    except SettingsError as err:
+        _error(connection, msg, err)
+        return
+    _save(hass, house, options)
+    connection.send_result(msg["id"], {})
 
 
 # ---- history and the dry-run check -------------------------------------------------

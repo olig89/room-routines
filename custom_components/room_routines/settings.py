@@ -247,6 +247,32 @@ def set_house_rules(options: Mapping[str, Any], rules: Iterable[Mapping[str, Any
     return out
 
 
+REORDERABLE = ("rules", "signals", "house_rules")
+
+
+def reorder(options: Mapping[str, Any], kind: str, order: Iterable[int], room_id: str | None = None) -> dict[str, Any]:
+    """A room's rules or Informs, or the house rules, in a new order (first wins).
+    ``order`` lists the old positions in their new order."""
+    if kind not in REORDERABLE:
+        raise SettingsError("invalid_order")
+    out = _options(options)
+    if kind == "house_rules":
+        items = list(out.get(CONF_HOUSE_RULES) or [])
+    else:
+        if room_id is None:
+            raise SettingsError("unknown_room")
+        items = list(_room(out, room_id).get(kind) or [])
+    order = [int(i) for i in order]
+    if sorted(order) != list(range(len(items))):
+        raise SettingsError("invalid_order")
+    moved = [items[i] for i in order]
+    if kind == "house_rules":
+        out[CONF_HOUSE_RULES] = moved
+    else:
+        out[CONF_ROOMS][room_id][kind] = moved
+    return out
+
+
 def set_lights_outs(options: Mapping[str, Any], items: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     """Every Lights out at once. A new one (no id) gets an id."""
     out = _options(options)

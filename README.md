@@ -16,14 +16,14 @@ be a Home Assistant scene. A light switched on by hand is left alone, and change
 made by hand are remembered so the page can suggest better looks or times. Each
 room can run in log-only mode first.
 
-**Status: early development (0.11.0).** Install through HACS as a custom repository.
+**Status: early development (0.13.0).** Install through HACS as a custom repository.
 
 ## What you get
 
 - **A sidebar page** (admins only for now):
   - **Status**: each room's mode, what it's doing and why, the switch-off countdown, its light level against the threshold, its sensors (lit when they see someone), its lights and the look for the current period.
   - **Room detail**: a looks table (period × light) for Normal days and for Dark Days, with icon buttons under each period name: *Save as now* (saves the lights as a Home Assistant scene through the scene editor's own API, so the same scene can go on a wall button), *Pick a scene*, *Edit*, *Keep dark* and *Use previous* / *Use Normal*; suggestions from how the lights get changed by hand; what the room did, from Home Assistant's history; and for rooms in log-only, a **dry-run check** that pairs every switch the room would have made with the light's real switch and scores the match.
-  - **Your day**: the periods as a 24-hour strip, with a row for days that start differently, and whether today is a Normal day or a Dark Day, and why.
+  - **Timeline**: every room's day from midnight to midnight, coloured like the light itself (brightness and colour temperature or colour, from the looks and scenes), worked out from the same settings the rooms run on. Today at the top: the periods with a now line, sunrise and sunset, when a Dark Day can happen and why today is or isn't one, and Lights out. Rooms come in two groups, *On when someone's there* (striped: dark until someone comes in) and *All-day routines* (solid, from their timers to Lights out, with blends as gradients). A room gets a lane per way its day can go: days that run the same share one ("Every day", "Mon–Fri"), a Dark Day lane appears only where it differs, each "while …" rule gets the whole day as it goes while the rule holds, and each Inform gets a lane in its colour. Rules and Informs are in priority order (the first that holds wins); administrators drag a lane, or use its arrows, to change the order. Left of the now line is today so far, from Home Assistant's history: when the lights were really on (grey where they were switched on another way; history doesn't keep colours), changes by hand, and when each rule and Inform held. Tap a band to see its look, light by light. Rooms in the same area sit together, and rooms that aren't set up fold into one line.
   - **Settings** (administrators only, and refused to anyone else by the server): Lights out; add, change or remove rooms, with lights and sensors suggested from the area and any entity choosable; change, add, rename or remove periods (rooms' looks follow a renamed period, and a removed period's look passes to the period after it when that one was using it); Dark Days (where the reading comes from, which periods, the thresholds, the sunlight floor and the brightness).
   - A header with the current period, a stealth switch, and a banner across the page while stealth is on.
 - **Setup** creates five periods (overnight 23:00, early morning 05:30, morning
