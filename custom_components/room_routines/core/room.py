@@ -71,9 +71,10 @@ period (Someone's there looks don't borrow from earlier periods).
 
 Hand: a light changed by hand while the room runs its lights is left as it was
 set; the room's other lights carry on. How long it's left alone is the room's
-``hand_hold``: until the lights are switched off (the default), until the
+``hand_hold``: until the lights are switched off, until the
 routine moves on (a new period, a Dark Day change, a rule starting or ending,
-someone arriving or the room emptying), or for ``hand_minutes``. Then it goes
+someone arriving or the room emptying), or for ``hand_minutes`` (rooms set up
+through the integration default to 20 minutes). Then it goes
 back to what the room is doing. ``layer()`` says which layer is on top now.
 
 A sensor listed in ``ends`` ends a visit the moment it goes off (a pantry door

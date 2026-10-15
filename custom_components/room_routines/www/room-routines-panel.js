@@ -960,13 +960,13 @@ class RoomRoutinesPanel extends HTMLElement {
     if (room) {
       this._roomDraft = { id: room.id, name: room.name, area_id: room.area_id, mode: room.mode, ...JSON.parse(JSON.stringify(room.settings)) };
     } else {
-      this._roomDraft = { id: null, name: "", area_id: null, lights: [], triggers: [], holds: [], lux_sensors: [], self_fading: [], on_by_hand: "leave", hand_hold: "until_off", hand_minutes: 30, ends: [], blends: {}, period_starts: {}, timers: [], starters: [], only_when: [], rules: [], signals: [], ...ROOM_DEFAULTS };
+      this._roomDraft = { id: null, name: "", area_id: null, lights: [], triggers: [], holds: [], lux_sensors: [], self_fading: [], on_by_hand: "leave", hand_hold: "minutes", hand_minutes: 20, ends: [], blends: {}, period_starts: {}, timers: [], starters: [], only_when: [], rules: [], signals: [], ...ROOM_DEFAULTS };
     }
     const r = this._roomDraft;
     r.on_by_hand = r.on_by_hand || "leave";
     r.lux_sensors = [...(r.lux_sensors || (r.lux_sensor ? [r.lux_sensor] : []))];
-    r.hand_hold = r.hand_hold || "until_off";
-    r.hand_minutes = r.hand_minutes || 30;
+    r.hand_hold = r.hand_hold || "minutes";
+    r.hand_minutes = r.hand_minutes || 20;
     r.ends = [...(r.ends || [])];
     r.blends = { ...(r.blends || {}) };
     r.period_starts = { ...(r.period_starts || {}) };
@@ -1028,7 +1028,7 @@ class RoomRoutinesPanel extends HTMLElement {
 
   _handText(s) {
     if (s.hand_hold === "moves_on") return "until the routine moves on";
-    if (s.hand_hold === "minutes") return `for ${s.hand_minutes || 30} min`;
+    if (s.hand_hold === "minutes") return `for ${s.hand_minutes || 20} min`;
     return "until the lights are switched off";
   }
 
@@ -2136,8 +2136,8 @@ class RoomRoutinesPanel extends HTMLElement {
           drift_s: r.drift_s ?? ROOM_DEFAULTS.drift_s,
           self_fading: r.self_fading.filter((l) => r.lights.includes(l)),
           on_by_hand: r.on_by_hand || "leave",
-          hand_hold: r.hand_hold || "until_off",
-          hand_minutes: Math.max(1, Math.min(1440, Number(r.hand_minutes) || 30)),
+          hand_hold: r.hand_hold || "minutes",
+          hand_minutes: Math.max(1, Math.min(1440, Number(r.hand_minutes) || 20)),
           ends: r.ends.filter((e) => r.triggers.includes(e) || r.holds.includes(e)),
           blends: r.blends,
           period_starts: r.period_starts,

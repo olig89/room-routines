@@ -89,7 +89,7 @@ async def test_the_action_starts_the_routine_and_the_room_follows_the_day(hass, 
 
 
 async def test_a_hand_change_pauses_the_routine_until_the_lights_go_off(hass, lights, freezer):
-    await setup(hass)
+    await setup(hass, hand_hold="until_off")
     await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
     await hass.async_block_till_done()
     await at(hass, freezer, "2026-09-28 07:00:20+00:00")  # past the matcher's settle window
@@ -398,3 +398,45 @@ async def test_a_stepped_drift_leaves_a_light_changed_by_hand_and_carries_on_wit
     play_steps = len([c for c in lights.of("turn_on") if c["entity_id"] == PLAY])
     await at(hass, freezer, "2026-09-28 15:01:35+00:00")
     assert len([c for c in lights.of("turn_on") if c["entity_id"] == PLAY]) > play_steps  # still drifting
+
+
+async def test_a_hand_change_is_left_for_20_minutes_by_default(hass, lights, freezer):
+    await setup(hass)
+    await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
+    await hass.async_block_till_done()
+    await at(hass, freezer, "2026-09-28 07:00:20+00:00")
+    hass.states.async_set(PLAY, "on", {"brightness": 255})  # someone turns it up
+    await hass.async_block_till_done()
+    assert PLAY in room(hass).hand
+    await at(hass, freezer, "2026-09-28 07:21:00+00:00")
+    assert PLAY not in room(hass).hand  # back with the routine after 20 minutes
+
+
+async def test_reports_during_a_blend_transition_are_not_hand_changes(hass, lights, freezer):
+    """The bug in Oli's office: a blend step goes out with a 120 s transition and
+    the lamp reports levels on the way, long after the 10 s settle window."""
+    await setup(hass, hand_hold="until_off")
+    await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
+    await hass.async_block_till_done()
+    hass.states.async_set(PLAY, "on", {"brightness": 102, "supported_features": LightEntityFeature.TRANSITION})
+    await hass.async_block_till_done()
+    await at(hass, freezer, "2026-09-28 12:30:00+00:00")  # a blend step: 40 % -> 22.5 % over 120 s
+    assert lights.of("turn_on")[-1]["transition"] == 120
+    for second, level in ((30, 90), (60, 80), (100, 64)):  # 35 %, 31 %, 25 %
+        await at(hass, freezer, f"2026-09-28 12:30:{second % 60:02d}+00:00" if second < 60
+                 else f"2026-09-28 12:31:{second - 60:02d}+00:00")
+        hass.states.async_set(PLAY, "on", {"brightness": level, "supported_features": LightEntityFeature.TRANSITION})
+        await hass.async_block_till_done()
+        assert not room(hass).paused and PLAY not in room(hass).hand
+
+
+async def test_a_colour_settling_at_the_same_level_is_not_a_hand_change(hass, lights, freezer):
+    await setup(hass, hand_hold="until_off")
+    await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
+    await hass.async_block_till_done()
+    hass.states.async_set(PLAY, "on", {"brightness": 102, "color_temp_kelvin": 5000})
+    await hass.async_block_till_done()
+    await at(hass, freezer, "2026-09-28 07:05:00+00:00")  # minutes later, no command since
+    hass.states.async_set(PLAY, "on", {"brightness": 102, "color_temp_kelvin": 4878, "hs_color": [26.9, 20.9]})
+    await hass.async_block_till_done()
+    assert not room(hass).paused and PLAY not in room(hass).hand

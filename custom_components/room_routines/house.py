@@ -69,7 +69,7 @@ from .core.layers import LAYER_IDS
 from .core.signals import held_by, targets_from, targets_to
 from .core.habits import Change, Suggestion, change_from, change_to, suggest
 from .core.looks import OFF, LightTarget, Look, resolve, scaled
-from .core.matching import Command, OwnChangeMatcher
+from .core.matching import Command, OwnChangeMatcher, same_level
 from .core.periods import Schedule
 from .core.room import (
     ADJUSTED,
@@ -470,10 +470,25 @@ class RoomRunner:
             return
         now = dt_util.now()
         on = new.state == STATE_ON
-        own = self.matcher.is_own(
-            entity, now, on, brightness_pct(new) if on else None,
-            context_id=new.context.id, parent_id=new.context.parent_id,
-        )
+        old = event.data.get("old_state")
+        old_known = old is not None and old.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+        if (
+            old_known
+            and new.context.user_id is None
+            and same_level(
+                old.state == STATE_ON, brightness_pct(old) if old.state == STATE_ON else None,
+                on, brightness_pct(new) if on else None, self.matcher.tolerance_pct,
+            )
+        ):
+            # Same on/off and brightness: a colour settling, an attribute refresh or a
+            # template light re-rendering, not a person (unless someone did it in
+            # Home Assistant itself, which carries their user id).
+            own = True
+        else:
+            own = self.matcher.is_own(
+                entity, now, on, brightness_pct(new) if on else None,
+                context_id=new.context.id, parent_id=new.context.parent_id,
+            )
         if not own:
             self._before_fade.pop(entity, None)  # a person's level wins from now on
         self._run(self.room.lights(self._any_on(), own, now, entity))
@@ -999,7 +1014,10 @@ class RoomRunner:
     ) -> None:
         ctx = Context()
         pct = target.brightness_pct if target.on else None
-        self.matcher.record(Command(light, ctx.id, dt_util.now(), target.on, pct))
+        self.matcher.record(Command(
+            light, ctx.id, dt_util.now(), target.on, pct,
+            transition=transition or timedelta(0), from_pct=self._level_now(light),
+        ))
         data: dict[str, Any] = {ATTR_ENTITY_ID: light}
         if transition:
             data["transition"] = transition.total_seconds()
@@ -1027,6 +1045,13 @@ class RoomRunner:
             await self.hass.services.async_call(
                 "light", "turn_on", {ATTR_ENTITY_ID: light, "flash": "short"}, context=ctx
             )
+
+    def _level_now(self, light: str) -> float | None:
+        """The light's brightness now (None when off or unknown): where a transition starts."""
+        state = self.hass.states.get(light)
+        if state is None or state.state != STATE_ON:
+            return None
+        return brightness_pct(state)
 
     def _supports_transition(self, light: str) -> bool:
         state = self.hass.states.get(light)
@@ -1097,14 +1122,16 @@ class RoomRunner:
             return
         ctx = Context()
         now = dt_util.now()
+        span = transition or timedelta(0)
         if lights is None:
             for light in self.config.switchable():
-                self.matcher.record(Command(light, ctx.id, now, True, anything=True))
+                self.matcher.record(Command(light, ctx.id, now, True, anything=True, transition=span))
         else:
             for light, target in lights.items():
-                self.matcher.record(
-                    Command(light, ctx.id, now, target.on, target.brightness_pct if target.on else None)
-                )
+                self.matcher.record(Command(
+                    light, ctx.id, now, target.on, target.brightness_pct if target.on else None,
+                    transition=span, from_pct=self._level_now(light),
+                ))
         data: dict[str, Any] = {ATTR_ENTITY_ID: scene}
         if transition:
             data["transition"] = transition.total_seconds()

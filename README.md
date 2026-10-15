@@ -55,13 +55,17 @@ room can run in log-only mode first.
     (`room_routines.switch_on` / `switch_off`, given the room's Status sensor),
     for wall buttons.
   A light changed by hand while the room runs it is left as it was set; the
-  room's other lights carry on. Per room, it's left alone until the lights are
-  switched off (the default), until the routine moves on (a new period, a Dark
-  Day change, a rule starting or ending, someone arriving or the room emptying)
-  or for a number of minutes, and then goes back to what the room is doing.
+  room's other lights carry on. Per room, it's left alone for a number of
+  minutes (the default: 20), until the lights are switched off, or until the
+  routine moves on (a new period, a Dark Day change, a rule starting or ending,
+  someone arriving or the room emptying), and then goes back to what the room
+  is doing. The room's own changes aren't mistaken for a person's: a light
+  reporting its progress during a transition, reporting late, or only settling
+  its colour at the same level counts as the room's doing.
   A sensor can be marked **off at once**: when it goes off (a pantry door
   closing) the lights go off straight away, without waiting for the other
-  sensors, the timeout or the fade. A room without sensors stays on until something switches it off.
+  sensors, the timeout or the fade. It ignores the hold sensors, so don't use
+  it where someone could be left inside (a toddler in a pantry). A room without sensors stays on until something switches it off.
   A routine that was running carries on after Home Assistant restarts (a hand
   change that was holding it stays held), instead of the room treating its lit
   lights as switched on by hand. A light that reports in late after the restart
