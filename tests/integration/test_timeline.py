@@ -45,10 +45,10 @@ def options():
             "lights_outs": [{"id": "n", "name": "Lights out", "when": "time", "at": "01:00", "mode": "live"}]}
 
 
-async def setup(hass: HomeAssistant) -> MockConfigEntry:
+async def setup(hass: HomeAssistant, **over) -> MockConfigEntry:
     for entity in (LAMP, BATH, MOTION, CALL, MUTED, BEDTIME):
         hass.states.async_set(entity, "off")
-    entry = MockConfigEntry(domain=DOMAIN, title="Room Routines", data={}, options=options())
+    entry = MockConfigEntry(domain=DOMAIN, title="Room Routines", data={}, options={**options(), **over})
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
@@ -91,3 +91,18 @@ async def test_reordering_informs_and_rules_saves_the_new_priority(hass, lights,
     await ws.send_json({"id": 2, "type": "room_routines/reorder", "kind": "rules", "room_id": "bath", "order": [0, 0]})
     reply = await ws.receive_json()
     assert not reply["success"] and reply["error"]["code"] == "invalid_order"
+
+
+async def test_only_a_live_lights_out_on_its_days_ends_the_routine(hass, lights, hass_ws_client):
+    await setup(hass, lights_outs=[
+        {"id": "a", "name": "Trial", "when": "time", "at": "22:00"},  # log only: it only says what it would do
+        {"id": "b", "name": "Weekends", "when": "time", "at": "23:00", "days": "days", "weekdays": [5, 6], "mode": "live"},
+        {"id": "c", "name": "Workdays", "when": "time", "at": "00:30", "days": "workdays", "mode": "live"},
+    ])
+    ws = await hass_ws_client(hass)
+    await ws.send_json({"id": 1, "type": "room_routines/timeline"})
+    office = next(r for r in (await ws.receive_json())["result"]["rooms"] if r["id"] == "office")
+    assert office["lights_out"] == 30  # Thursday: the workday one, not the trial or the weekend one
+    lanes = {l["label"]: l for l in office["lanes"] if l["key"] == "base"}
+    sat = next(l for label, l in lanes.items() if "Sat" in label)
+    assert sat["bands"][-1]["end"] == 23 * 60

@@ -51,6 +51,7 @@ class Band:
     visit: bool = True  # only while someone's there
     blend_to: Look | None = None
     blend_period: str | None = None
+    blend_factor: float = 1.0  # Dark Day brightness on the look being blended into
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,26 @@ class DayFacts:
     dark_periods: tuple[str, ...] = ()
     auto_dim: float = 1.0
     sun_down: Callable[[int], bool] = field(default=lambda minute: False)
-    lights_out: int | None = None  # minute a Lights out covering the room runs, if known
+    # When a live Lights out covering the room runs on a day: a minute, or
+    # (day, workday) -> minute or None.
+    lights_out: int | Callable[[date, bool], int | None] | None = None
+    house_schedule: Schedule | None = None  # Dark Days follow the house's periods
+
+    def lights_out_on(self, day: date, workday: bool) -> int | None:
+        return self.lights_out(day, workday) if callable(self.lights_out) else self.lights_out
+
+    def workday(self, day: date) -> bool:
+        if day == self.today and self.workday_today is not None:
+            return self.workday_today
+        return day.weekday() < 5
+
+    def house_period_at(self, schedule: Schedule, day: date, minute: int) -> str:
+        spans = day_spans(self.house_schedule or schedule, day)
+        return next((name for start, end, name in spans if start <= minute < end), spans[-1][2])
+
+    def dim_at(self, schedule: Schedule, day: date, minute: int, dark: bool) -> bool:
+        """On the Dark Day track then: a Dark Day, inside one of the house's dark periods."""
+        return dark and self.house_period_at(schedule, day, minute) in self.dark_periods
 
 
 def day_spans(schedule: Schedule, day: date) -> list[tuple[int, int, str]]:
@@ -85,15 +105,21 @@ def day_spans(schedule: Schedule, day: date) -> list[tuple[int, int, str]]:
     )
     out: list[tuple[int, int, str]] = []
     if starts[0][0] > 0:
-        out.append((0, starts[0][0], starts[-1][1]))  # the last period runs on past midnight
+        # Yesterday's last period runs on past midnight (yesterday's times: alt days differ).
+        before = day - timedelta(days=1)
+        last = max(schedule.periods, key=lambda p: (schedule.start_on(p, before), p.name))
+        out.append((0, starts[0][0], last.name))
     for i, (start, name) in enumerate(starts):
         end = starts[i + 1][0] if i + 1 < len(starts) else DAY
         out.append((start, end, name))
     return out
 
 
-def _next_period(spans: list[tuple[int, int, str]], index: int) -> str:
-    return spans[(index + 1) % len(spans)][2] if index + 1 < len(spans) else spans[0][2]
+def _next_period(spans: list[tuple[int, int, str]], index: int) -> str | None:
+    """The period after this span; None where it carries on past midnight."""
+    if index + 1 < len(spans):
+        return spans[index + 1][2]
+    return None if spans[0][0] == 0 and spans[0][1] < DAY and spans[0][2] == spans[index][2] else spans[0][2]
 
 
 def _own_someone(config: RoomConfig, period: str, track: str) -> LookSource | None:
@@ -106,101 +132,134 @@ def _own_someone(config: RoomConfig, period: str, track: str) -> LookSource | No
 
 
 def _source(config: RoomConfig, schedule: Schedule, period: str, track: str, rule: Rule | None,
-            someone: bool) -> LookSource | None:
+            someone: bool, visiting: bool = False) -> LookSource | None:
     """The look a period gets, as the room works it out. ``someone``: the row
-    above an all-day routine (None where Someone's there has no look then)."""
+    above an all-day routine (None where Someone's there has no look then).
+    ``visiting``: someone came in (motion) while no routine was running."""
     if someone:
         return _own_someone(config, period, track)
     if rule is not None and rule.action == LOOK:
         if rule.scene:
             return LookSource(Look(scene=rule.scene), period, track)
         period = rule.period or period
-    if config.has_sensors and not config.runs_ambient and (own := _own_someone(config, period, track)):
-        return own  # a motion room uses its Someone's there look where it has one
+    if visiting and (own := _own_someone(config, period, track)):
+        return own  # someone's there: their own look where the period has one
     return resolve(period, track, config.looks, config.dim_looks, schedule)
 
 
 def _while(condition, who: str) -> str:
-    return f"{who} {'is not' if condition.negate else 'is'} {condition.state}"
+    verb = "isn't" if condition.negate else "is"
+    return f"{who} {verb} {condition.state}"
 
 
-def _routine_on(config: RoomConfig, day: date, facts: DayFacts, workday: bool, dark: bool,
+def _events(config: RoomConfig, schedule: Schedule, day: date, facts: DayFacts, dark: bool) -> list[tuple[int, bool]]:
+    """A day's timer and Lights out switches, as (minute, on), in the order they act."""
+    workday = facts.workday(day)
+    events: list[tuple[int, bool]] = []
+    for timer in config.timers:
+        minute = timer.at.hour * 60 + timer.at.minute
+        # Dark for a timer: on the Dark Day track then, or the sun is down (as the house works it out).
+        dark_then = facts.dim_at(schedule, day, minute, dark) or facts.sun_down(minute)
+        if due(timer, Today(day, workday, dark_then, {p: True for p in timer.only_home}))[0]:
+            events.append((minute, timer.action == TIMER_ON))
+    if (lights_out := facts.lights_out_on(day, workday)) is not None:
+        events.append((lights_out, False))
+    events.sort(key=lambda e: (e[0], e[1]))
+    return events
+
+
+def _routine_on(config: RoomConfig, schedule: Schedule, day: date, facts: DayFacts, dark: bool,
                 rule: Rule | None) -> list[tuple[int, int]] | None:
     """When an all-day routine is running: [(start, end)], or None if nothing in
     its settings says when (it starts from a starter, a button or by hand)."""
     if rule is not None and rule.action == RULE_NOTHING:
         return []
-    events: list[tuple[int, bool]] = []
-    for timer in config.timers:
-        minute = timer.at.hour * 60 + timer.at.minute
-        today = Today(day, workday, dark or facts.sun_down(minute), {p: True for p in timer.only_home})
-        if due(timer, today)[0]:
-            events.append((minute, timer.action == TIMER_ON))
-    if facts.lights_out is not None:
-        events.append((facts.lights_out, False))
-    if not any(on for _, on in events):
-        # A timer that isn't due today: off all day. No timer at all: it starts some other way.
-        return [] if any(t.action == TIMER_ON for t in config.timers) else None
-    events.sort(key=lambda e: (e[0], e[1]))
-
-    def run(on_at_midnight: bool) -> tuple[list[tuple[int, int]], bool]:
-        out, on, since = [], on_at_midnight, 0
-        for minute, switch_on in events:
-            if switch_on and not on:
-                on, since = True, minute
-            elif not switch_on and on:
-                if minute > since:
-                    out.append((since, minute))
-                on = False
-        if on and since < DAY:
-            out.append((since, DAY))
-        return out, on
-
-    first, ends_on = run(False)
-    if ends_on:
-        first, _ = run(True)  # yesterday ran on past midnight in the same way
-    return [(a, b) for a, b in first if b > a]
+    if not any(t.action == TIMER_ON for t in config.timers):
+        return None
+    # Running at midnight: the last switch on the days before (within a week) left it on.
+    on = False
+    for back in range(1, 8):
+        if before := _events(config, schedule, day - timedelta(days=back), facts, dark):
+            on = before[-1][1]
+            break
+    out: list[tuple[int, int]] = []
+    since = 0
+    for minute, switch_on in _events(config, schedule, day, facts, dark):
+        if switch_on and not on:
+            on, since = True, minute
+        elif not switch_on and on:
+            if minute > since:
+                out.append((since, minute))
+            on = False
+    if on and since < DAY:
+        out.append((since, DAY))
+    return out
 
 
-def _bands(config: RoomConfig, schedule: Schedule, day: date, facts: DayFacts, workday: bool, dark: bool,
-           rule: Rule | None = None, someone: bool = False) -> tuple[Band, ...] | None:
-    """One way the day can go. None: the routine has no known times (a lane note says so)."""
+def _segments(windows: list[tuple[int, int]], visits: bool) -> list[tuple[int, int, bool]]:
+    """The routine's windows (not visits), and between them, if motion starts
+    visits, the rest of the day (visits)."""
+    out = [(a, b, False) for a, b in windows]
+    if visits:
+        at = 0
+        for a, b in sorted(windows):
+            if a > at:
+                out.append((at, a, True))
+            at = max(at, b)
+        if at < DAY:
+            out.append((at, DAY, True))
+    return sorted(out)
+
+
+def _bands(config: RoomConfig, schedule: Schedule, day: date, facts: DayFacts, dark: bool,
+           rule: Rule | None = None, someone: bool = False,
+           within: list[tuple[int, int]] | None = None) -> tuple[Band, ...] | None:
+    """One way the day can go. None: the routine has no known times (a lane note
+    says so). ``within``: the someone row, only while the routine runs."""
     if rule is not None and rule.action == RULE_NOTHING:
         return ()
     spans = day_spans(schedule, day)
     ambient = config.runs_ambient and not someone
-    windows = _routine_on(config, day, facts, workday, dark, rule) if ambient else [(0, DAY)]
-    if windows is None:
-        return None
+    if ambient:
+        windows = _routine_on(config, schedule, day, facts, dark, rule)
+        if windows is None:
+            return None
+        segments = _segments(windows, config.has_sensors)  # motion outside the routine is a visit
+    else:
+        segments = [(a, b, True) for a, b in (within if within is not None else [(0, DAY)])]
+    # Where the Dark Day track starts and stops (the house's periods), inside the room's.
+    house_cuts = {s for s, _, _ in day_spans(facts.house_schedule or schedule, day)} if dark else set()
     cap = rule.max_pct if rule is not None and rule.action == CAP else None
+    no_blend = (rule is not None and rule.action == LOOK) or someone
     bands: list[Band] = []
     for i, (start, end, period) in enumerate(spans):
-        track = DIM if dark and period in facts.dark_periods else NORMAL
-        source = _source(config, schedule, period, track, rule, someone)
-        if source is None or source.look.nothing:
-            continue
-        factor = facts.auto_dim if track != NORMAL and source.track == NORMAL else 1.0
-        blend_minutes = 0 if (rule is not None and rule.action == LOOK) or someone else config.blends.get(period, 0)
         nxt = _next_period(spans, i)
-        blend_from = max(start, end - int(blend_minutes)) if blend_minutes else end
-        target = None
-        if blend_minutes:
-            next_track = DIM if dark and nxt in facts.dark_periods else NORMAL
-            nsrc = _source(config, schedule, nxt, next_track, rule, someone)
-            target = None if nsrc is None or nsrc.look.nothing else nsrc.look
-            if target is None:
-                blend_from = end
-        for a, b in windows:
-            lo, hi = max(a, start), min(b, end)
+        blend_minutes = 0 if no_blend or nxt is None else int(config.blends.get(period, 0))
+        blend_from = max(start, end - blend_minutes) if blend_minutes else end
+        for seg_a, seg_b, visiting in segments:
+            lo, hi = max(seg_a, start), min(seg_b, end)
             if hi <= lo:
                 continue
-            common = dict(period=period, look=source.look, track=track, factor=factor, cap=cap, visit=not ambient)
-            if target is not None and blend_from < hi:
-                if blend_from > lo:
-                    bands.append(Band(lo, blend_from, **common))
-                bands.append(Band(max(lo, blend_from), hi, blend_to=target, blend_period=nxt, **common))
-            else:
-                bands.append(Band(lo, hi, **common))
+            cuts = sorted({lo, hi, *(c for c in (blend_from, *house_cuts) if lo < c < hi)})
+            for a, b in zip(cuts, cuts[1:]):
+                track = DIM if facts.dim_at(schedule, day, a, dark) else NORMAL
+                source = _source(config, schedule, period, track, rule, someone, visiting)
+                if source is None or source.look.nothing:
+                    continue
+                factor = facts.auto_dim if track != NORMAL and source.track == NORMAL else 1.0
+                common = dict(period=period, look=source.look, track=track, factor=factor, cap=cap,
+                              visit=visiting)
+                target = None
+                if a >= blend_from:
+                    # The room blends into the next period's look as it shows on the track it's on now.
+                    nsrc = _source(config, schedule, nxt, track, rule, someone, visiting)
+                    if nsrc is not None and not nsrc.look.nothing:
+                        target = nsrc
+                if target is not None:
+                    tfactor = facts.auto_dim if track != NORMAL and target.track == NORMAL else 1.0
+                    bands.append(Band(a, b, blend_to=target.look, blend_period=nxt, blend_factor=tfactor, **common))
+                else:
+                    bands.append(Band(a, b, **common))
     return _merged(bands)
 
 
@@ -209,16 +268,18 @@ def _merged(bands: list[Band]) -> tuple[Band, ...]:
     out: list[Band] = []
     for band in bands:
         last = out[-1] if out else None
-        if (
-            last is not None and last.end == band.start and last.blend_to is None and band.blend_to is None
-            and (last.look, last.track, last.factor, last.cap, last.visit)
-            == (band.look, band.track, band.factor, band.cap, band.visit)
-        ):
+        same = last is not None and last.end == band.start and (
+            last.look, last.track, last.factor, last.cap, last.visit, last.blend_to, last.blend_factor
+        ) == (band.look, band.track, band.factor, band.cap, band.visit, band.blend_to, band.blend_factor)
+        if same and band.blend_to is not None:
+            same = last.period == band.period and last.blend_period == band.blend_period  # one blend, cut in two
+        if same:
             first = (last.period or "").split(" to ")[0]
             name = first if first == band.period else f"{first} to {band.period}"
             if last.start == 0 and band.end == DAY:
                 name = "All day"
-            out[-1] = Band(last.start, band.end, name, last.look, last.track, last.factor, last.cap, last.visit)
+            out[-1] = Band(last.start, band.end, name, last.look, last.track, last.factor, last.cap, last.visit,
+                           last.blend_to, last.blend_period, last.blend_factor)
         else:
             out.append(band)
     return tuple(out)
@@ -254,9 +315,12 @@ def room_lanes(
     variants: list[tuple[tuple[Band, ...] | None, int, bool, bool]] = []
     for offset in range(7):
         day = facts.today + timedelta(days=offset)
-        workday = facts.workday_today if offset == 0 and facts.workday_today is not None else day.weekday() < 5
-        for dark in (False, True) if dark_differs else (False,):
-            variants.append((_bands(config, schedule, day, facts, workday, dark), day.weekday(), dark, offset == 0))
+        normal = _bands(config, schedule, day, facts, False)
+        variants.append((normal, day.weekday(), False, offset == 0))
+        if dark_differs:
+            dark = _bands(config, schedule, day, facts, True)
+            if dark != normal:  # a Dark Day the same as that day's Normal day isn't drawn twice
+                variants.append((dark, day.weekday(), True, offset == 0))
     groups: list[tuple[tuple[Band, ...] | None, bool, list[int], bool]] = []
     for bands, weekday, dark, is_today in variants:
         for i, (gb, gdark, gdays, gtoday) in enumerate(groups):
@@ -266,32 +330,32 @@ def room_lanes(
                 break
         else:
             groups.append((bands, dark, [weekday], is_today))
-    if dark_differs:
-        # A Dark Day lane the same as its Normal day isn't drawn twice.
-        normal = [(sorted(d), b) for b, dk, d, _ in groups if not dk]
-        groups = [g for g in groups if not g[1] or (sorted(g[2]), g[0]) not in normal]
     groups.sort(key=lambda g: (not g[3], g[1]))
     lanes: list[Lane] = []
     only_one = len([g for g in groups if not g[1]]) == 1
     for bands, dark, days, is_today in groups:
-        label = _days_label(days) if not only_one or dark else "Every day"
+        label = "Every day" if only_one and not dark else _days_label(days)
         if dark:
-            label = "Dark Day" if only_one else f"{label} · Dark Day"
+            label = "Dark Day" if len(set(days)) == 7 else f"{label} · Dark Day"
         note = "" if bands is not None else "Runs when it's started (a starter, a button or the lights switched on), until it's switched off."
         lanes.append(Lane("base", label, bands or (), note, tuple(sorted(days)), dark, is_today))
 
     today = facts.today
-    workday = facts.workday_today if facts.workday_today is not None else today.weekday() < 5
     if config.runs_ambient and config.has_someone_looks:
+        # Someone's there brightens the routine while it runs (outside it, a visit is on the routine's lane).
+        within = _routine_on(config, schedule, today, facts, False, None)
         lanes.insert(0, Lane("someone", "Someone's here",
-                             _bands(config, schedule, today, facts, workday, False, someone=True) or ()))
+                             _bands(config, schedule, today, facts, False, someone=True, within=within) or ()))
 
     for key, items in (("rule", list(enumerate(config.rules))), ("house_rule", list(house_rules))):
         for index, rule in items:
             who = name(rule.when.entity)
             label = rule.name or f"While {_while(rule.when, who)}"
-            bands = _bands(config, schedule, today, facts, workday, False, rule=rule)
-            note = "Does nothing while this holds: no lights come on." if rule.action == RULE_NOTHING else ""
+            bands = _bands(config, schedule, today, facts, False, rule=rule)
+            note = ""
+            if rule.action == RULE_NOTHING:
+                note = ("Nothing starts while this holds (a routine already running carries on)."
+                        if config.runs_ambient else "Does nothing while this holds: no lights come on.")
             if bands is None:
                 bands, note = (), "Runs when it's started, with this rule's look."
             lanes.append(Lane(key, label, bands, note, index=index))

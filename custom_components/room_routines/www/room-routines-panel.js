@@ -55,6 +55,7 @@ const ERRORS = {
   unknown_period: "That period no longer exists. Reload the page.",
   unknown_room: "That room no longer exists. Reload the page.",
   invalid_look: "That look isn't valid.",
+  invalid_order: "The list changed while you were moving it. The Timeline has been reloaded: try again.",
   unauthorized: "Only an administrator can change this.",
   unknown_scene: "Home Assistant didn't create the scene in time. Try again in a moment.",
   unknown_track: "That track doesn't exist.",
@@ -112,6 +113,10 @@ function tlShade(rgb, pct) {
   return rgb.map((v, i) => Math.round(TL_BASE[i] + (v - TL_BASE[i]) * f));
 }
 const tlCss = (c) => `rgb(${c.join(",")})`;
+const tlCssA = (c, a) => `rgba(${c.join(",")},${a})`;
+// Stripes for a visit (rgba, not color-mix: older wall-tablet browsers drop the whole background otherwise).
+const tlStripes = (c) => `repeating-linear-gradient(135deg, ${tlCss(c)} 0 7px, ${tlCssA(c, 0.35)} 7px 11px)`;
+const TL_STRIPE_OVER = "repeating-linear-gradient(135deg, transparent 0 7px, rgba(128,128,128,.6) 7px 11px)";
 const tlInk = (c) => (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2] > 140 ? "#1b1712" : "#f3efe8");
 // The colours a look shows: one per distinct light colour (at most two), or null when it's dark.
 function tlColours(look) {
@@ -914,7 +919,14 @@ class RoomRoutinesPanel extends HTMLElement {
     if (this._tlLoading) return;
     this._tlLoading = true;
     try {
-      this._tl = await this._hass.callWS({ type: "room_routines/timeline" });
+      const tl = await this._hass.callWS({ type: "room_routines/timeline" });
+      const pop = this._tlPop;
+      if (pop) {
+        const lanes = (tl) => JSON.stringify((tl?.rooms || []).find((r) => r.id === pop.room)?.lanes || null);
+        if (lanes(tl) !== lanes(this._tl)) this._tlPop = null; // the band it pointed at may have moved
+      }
+      this._tl = tl;
+      this._tlOkAt = Date.now();
       this._tlError = null;
     } catch (err) {
       this._tlError = err.message || String(err);
@@ -928,6 +940,7 @@ class RoomRoutinesPanel extends HTMLElement {
     if (!this._tlLoading && Date.now() - this._tlAt > 60000) this._loadTimeline();
     const tl = this._tl;
     if (!tl) return this._tlError ? `<div class="card warn">Couldn't load the Timeline: ${esc(this._tlError)}</div>` : `<div class="card">Loading the Timeline…</div>`;
+    const stale = this._tlError ? `<div class="card warn">Couldn't refresh the Timeline (${esc(this._tlError)}): showing it as it was at ${new Date(this._tlOkAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.</div>` : "";
     const rooms = tl.rooms.map((r) => ({ ...r, snap: d.rooms.find((x) => x.id === r.id) }));
     const live = rooms.filter((r) => r.group !== "off");
     const off = rooms.filter((r) => r.group === "off");
@@ -945,7 +958,7 @@ class RoomRoutinesPanel extends HTMLElement {
       }).join("");
       return `<div class="tl-group"><div class="tl-grouphead"><h3>${title}</h3><span class="meta">${list.length} room${list.length === 1 ? "" : "s"} · ${sub}</span></div>${this._tlHours()}${body}</div>`;
     };
-    return `
+    return `${stale}
       ${this._tlToday(d, tl)}
       ${group("someone", "On when someone's there", "dark until someone comes in")}
       ${group("allday", "All-day routines", "on through the day once started")}
@@ -990,8 +1003,9 @@ class RoomRoutinesPanel extends HTMLElement {
     const bits = [];
     if ((s.triggers || []).length || (s.holds || []).length) {
       bits.push(`${(s.triggers || []).map((e) => esc(this._name(e))).join(" or ") || "no trigger"}${(s.holds || []).length ? `, held by ${(s.holds || []).map((e) => esc(this._name(e))).join(", ")}` : ""}`);
-      if (r.group === "someone") bits.push(`off ${s.timeout_s >= 60 ? `${Math.round(s.timeout_s / 60)} min` : `${s.timeout_s} s`} after the last movement`);
-      if (s.threshold_lux != null) bits.push(`only below ${s.threshold_lux} lx`);
+      const timeout = s.timeout_s ?? ROOM_DEFAULTS.timeout_s;
+      if (r.group === "someone") bits.push(`off ${timeout >= 60 ? `${Math.round(timeout / 60)} min` : `${timeout} s`} after the last movement`);
+      if (s.threshold_lux != null && (s.lux_sensors || []).length) bits.push(`only below ${s.threshold_lux} lx`);
     }
     for (const t of s.timers || []) bits.push(esc(this._timerText(t)));
     if (r.lights_out != null) bits.push(`off at Lights out ${tlTime(r.lights_out)}`);
@@ -1030,8 +1044,9 @@ class RoomRoutinesPanel extends HTMLElement {
       } else if (cs.length > 1) {
         bg = `linear-gradient(180deg, ${tlCss(cs[0])} 0 50%, ${tlCss(cs[1])} 50% 100%)`;
       } else if (b.visit) {
-        bg = `repeating-linear-gradient(135deg, ${tlCss(c)} 0 7px, color-mix(in srgb, ${tlCss(c)} 35%, transparent) 7px 11px)`;
+        bg = tlStripes(c);
       } else bg = tlCss(c);
+      if (b.visit && (b.blend_to || cs.length > 1)) bg = `${TL_STRIPE_OVER}, ${bg}`; // still a visit: striped over the colours
       const w = ((b.end - b.start) / 1440) * 100;
       const label = w > 9 ? `<span>${esc(b.look.name)}${b.cap != null ? ` ≤${b.cap} %` : ""}</span>` : "";
       inner += `<button class="tl-seg${lane.key === "rule" || lane.key === "house_rule" ? " alt" : ""}" style="left:${tlPct(b.start)};width:${w}%;background:${bg};color:${tlInk(c)}" data-tl-band="${esc(r.id)}|${li}|${bi}" title="${tlTime(b.start)}–${tlTime(b.end)} · ${esc(b.look.name)}" aria-label="${esc(lane.label)}, ${tlTime(b.start)} to ${tlTime(b.end)}: ${esc(b.look.name)}">${label}</button>`;
@@ -1039,7 +1054,7 @@ class RoomRoutinesPanel extends HTMLElement {
     if (lane.key === "inform") {
       const cs = tlColours(lane.look);
       const c = cs ? tlCss(tlMid(cs)) : "var(--secondary-text-color)";
-      inner += `<div class="tl-inform" style="--c:${c}"></div>`;
+      inner += `<div class="tl-inform" style="--ca:${cs ? tlCssA(tlMid(cs), 0.3) : "rgba(128,128,128,.3)"}"></div>`;
       for (const [a, b] of (hist.held || {})[`inform:${lane.index}`] || []) inner += `<div class="tl-visit" style="left:${tlPct(a)};width:max(3px, ${tlPct(b - a)});background:${c}" title="${tlTime(a)}–${tlTime(b)} · ${esc(lane.label)}"></div>`;
     }
     if (lane.key === "rule" || lane.key === "house_rule") {
@@ -1054,7 +1069,7 @@ class RoomRoutinesPanel extends HTMLElement {
     }
     const lo = r.lights_out != null ? `<div class="tl-lo" style="left:${tlPct(r.lights_out)}" title="Lights out"></div>` : "";
     const overlay = `${lo}<div class="tl-past" style="width:${tlPct(tlNow)}"></div><div class="tl-now" style="left:${tlPct(tlNow)}"></div>`;
-    const handle = can ? `<span class="tl-handle" title="Drag to change the priority" aria-hidden="true">⠿</span><button class="tl-move" data-tl-move="up" data-tl-kind="${reorder}" data-room="${esc(r.id)}" data-index="${lane.index}" aria-label="Higher priority">▲</button><button class="tl-move" data-tl-move="down" data-tl-kind="${reorder}" data-room="${esc(r.id)}" data-index="${lane.index}" aria-label="Lower priority">▼</button>` : "";
+    const handle = can ? `<span class="tl-handle" title="Drag to change the priority" aria-hidden="true">⠿</span><button class="tl-move" data-tl-move="up" data-tl-kind="${reorder}" data-room="${esc(r.id)}" data-index="${lane.index}" aria-label="Higher priority"${this._tlBusy ? " disabled" : ""}>▲</button><button class="tl-move" data-tl-move="down" data-tl-kind="${reorder}" data-room="${esc(r.id)}" data-index="${lane.index}" aria-label="Lower priority"${this._tlBusy ? " disabled" : ""}>▼</button>` : "";
     const kindTag = lane.key === "house_rule" ? `<small class="muted">house rule</small>` : lane.key === "inform" ? `<small class="muted">Inform</small>` : "";
     const pop = this._tlPop && this._tlPop.room === r.id && this._tlPop.lane === li ? this._tlPopCard(r, lane, lane.bands[this._tlPop.band]) : "";
     return `<div class="tl-row${can ? " tl-drag" : ""}" ${can ? `draggable="true" data-tl-kind="${reorder}" data-room="${esc(r.id)}" data-index="${lane.index}"` : ""}>
@@ -1081,7 +1096,7 @@ class RoomRoutinesPanel extends HTMLElement {
     const sw = (bg, extra = "") => `<div class="tl-sw" style="background:${bg}">${extra}</div>`;
     const warm = tlShade(kelvinRgb(2700), 50);
     return `<details class="tl-legend" data-pref="tl-legend"${loadPref("tl-legend", true) ? " open" : ""}><summary>How to read it</summary><div class="tl-legendgrid">${[
-      [sw(`repeating-linear-gradient(135deg, ${tlCss(warm)} 0 7px, color-mix(in srgb, ${tlCss(warm)} 35%, transparent) 7px 11px)`), "Striped: what a visit gets. The room is dark until someone comes in."],
+      [sw(tlStripes(warm)), "Striped: what a visit gets. The room is dark until someone comes in."],
       [sw(tlCss(warm)), "Solid: on through the day, as an all-day routine."],
       [sw(`linear-gradient(90deg, ${tlCss(tlShade(kelvinRgb(2200), 5))}, ${tlCss(warm)})`), "Gradient: blending into the next period's look."],
       [sw("var(--card-background-color)", `<div class="tl-visit" style="left:30%;width:25%;background:${tlCss(warm)}"></div>`), "Block: when the lights were really on today (grey: switched on another way)."],
@@ -1094,6 +1109,8 @@ class RoomRoutinesPanel extends HTMLElement {
   }
 
   async _tlReorder(kind, roomId, from, to) {
+    // One move at a time: a second click before the first is saved would work from the old order.
+    if (this._tlBusy) return;
     const d = this._data;
     const room = d.rooms.find((r) => r.id === roomId);
     const list = kind === "house_rules" ? d.house.house_rules || [] : (room?.settings?.[kind] || []);
@@ -1102,8 +1119,12 @@ class RoomRoutinesPanel extends HTMLElement {
     if (pos < 0 || to < 0 || to >= order.length || from === to) return;
     order.splice(pos, 1);
     order.splice(order.indexOf(to) + (to > from ? 1 : 0), 0, from);
+    this._tlBusy = true;
+    this._tlPop = null;
+    this._render();
     const res = await this._ws({ type: "room_routines/reorder", kind, order, ...(kind === "house_rules" ? {} : { room_id: roomId }) }, "Saved the new order.");
     if (!res.ok) this._notice = { text: res.error, bad: true };
+    this._tlBusy = false;
     this._tl = null;
     this._tlAt = 0;
     this._render();
@@ -2494,7 +2515,8 @@ const STYLES = `
   .tl-label { font-size:13px; color: var(--secondary-text-color); text-align:right; line-height:1.2; display:flex; gap:4px; justify-content:flex-end; align-items:center; flex-wrap:wrap; min-width:0; }
   .tl-label small { flex-basis:100%; }
   .tl-handle { cursor:grab; color: var(--secondary-text-color); }
-  .tl-move { border:0; background:none; color: var(--secondary-text-color); cursor:pointer; font-size:10px; padding:2px; }
+  .tl-move { border:0; background:none; color: var(--secondary-text-color); cursor:pointer; font-size:13px; min-width:32px; min-height:32px; padding:4px; }
+  .tl-move:disabled { opacity:.4; cursor:wait; }
   .tl-move:focus-visible { outline:2px solid var(--primary-color); }
   .tl-lane { position:relative; height:30px; border-radius:6px; overflow:hidden; background: repeating-linear-gradient(135deg, transparent 0 5px, var(--divider-color) 5px 6px); }
   .tl-lane.thin { height:14px; }
@@ -2502,7 +2524,7 @@ const STYLES = `
   .tl-seg.alt { opacity:.75; }
   .tl-seg:focus-visible { outline:2px solid var(--primary-color); outline-offset:-2px; z-index:6; }
   .tl-seg span { overflow:hidden; text-overflow:ellipsis; }
-  .tl-inform { position:absolute; inset:0; background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--c) 30%, transparent) 0 5px, transparent 5px 9px); }
+  .tl-inform { position:absolute; inset:0; background: repeating-linear-gradient(135deg, var(--ca) 0 5px, transparent 5px 9px); }
   .tl-visit { position:absolute; z-index:3; top:-1px; bottom:-1px; border-radius:2px; box-shadow:0 0 0 1px rgba(0,0,0,.25); pointer-events:none; }
   .tl-hand { position:absolute; z-index:3; top:0; bottom:0; background: repeating-linear-gradient(45deg, var(--warning-color, #e08a00) 0 3px, transparent 3px 7px); box-shadow: inset 0 0 0 1px var(--warning-color, #e08a00); pointer-events:none; }
   .tl-held { position:absolute; z-index:3; bottom:0; height:4px; background: var(--primary-text-color); border-radius:2px; pointer-events:none; }
@@ -2515,7 +2537,7 @@ const STYLES = `
   .tl-prd { position:relative; height:20px; }
   .tl-prd div { position:absolute; top:3px; bottom:3px; border-left:2px solid var(--divider-color); padding-left:5px; font-size:11px; line-height:14px; color: var(--secondary-text-color); white-space:nowrap; overflow:hidden; }
   .tl-strip { position:relative; height:8px; border:1px solid var(--divider-color); border-radius:4px; overflow:hidden; }
-  .tl-strip div { position:absolute; top:0; bottom:0; background: color-mix(in srgb, var(--primary-color) 25%, transparent); }
+  .tl-strip div { position:absolute; top:0; bottom:0; background: rgba(3,169,244,.25); background: color-mix(in srgb, var(--primary-color) 25%, transparent); }
   .tl-off { margin-top:22px; border:1px dashed var(--divider-color); border-radius:10px; padding:10px 14px; color: var(--secondary-text-color); font-size:14px; }
   .tl-off a, .tl-pop a { color: var(--primary-color); }
   .tl-pop { margin:4px 0 8px; max-width:24rem; background: var(--card-background-color); border:1px solid var(--divider-color); border-radius:12px; padding:12px 14px; box-shadow:0 8px 24px rgba(0,0,0,.15); font-size:14px; display:grid; gap:6px; }

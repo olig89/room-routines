@@ -12,7 +12,8 @@ the room had put them on; the page colours those times from the lane.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from collections.abc import Callable
+from datetime import date, datetime, timedelta
 from functools import partial
 from typing import Any
 
@@ -22,13 +23,14 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers.sun import get_astral_event_date
 from homeassistant.util import dt as dt_util
 
-from .const import MODE_OFF
+from .const import MODE_LIVE, MODE_OFF
 from .core.daylight import MIN_ELEVATION
 from .core.habits import ADJUSTED
-from .core.lights_out import AT_PERIOD, AT_TIME, MODE_OFF as LIGHTS_OUT_OFF
+from .core.lights_out import AT_PERIOD, AT_TIME, MODE_LIVE as LIGHTS_OUT_LIVE, MODE_OFF as LIGHTS_OUT_OFF, LightsOut
 from .core.looks import Look
-from .core.room import FOR_MINUTES
+from .core.room import FOR_MINUTES, MOVES_ON
 from .core.timeline import Band, DayFacts, Lane, day_spans, room_lanes
+from .core.timers import Today
 from .house import House, RoomRunner, scene_lights
 
 
@@ -79,7 +81,7 @@ def _band_json(hass: HomeAssistant, runner: RoomRunner, band: Band) -> dict[str,
     return {
         "start": band.start, "end": band.end, "period": band.period, "visit": band.visit, "track": band.track,
         "look": look_json(hass, runner, band.look, band.factor, band.cap),
-        "blend_to": look_json(hass, runner, band.blend_to, band.factor, band.cap),
+        "blend_to": look_json(hass, runner, band.blend_to, band.blend_factor, band.cap),
         "blend_period": band.blend_period, "cap": band.cap,
     }
 
@@ -95,20 +97,35 @@ def _lane_json(hass: HomeAssistant, runner: RoomRunner, lane: Lane) -> dict[str,
     return out
 
 
-def _lights_out_minute(house: House, runner: RoomRunner, now: datetime) -> tuple[int | None, list[dict[str, Any]]]:
-    """When a Lights out covering the room runs today (None: not at a known time)."""
-    found: int | None = None
-    for lo in house.lights_outs:
-        if lo.mode == LIGHTS_OUT_OFF or not lo.covers(runner.room_id):
-            continue
-        minute = None
-        if lo.when == AT_TIME and lo.at is not None:
-            minute = lo.at.hour * 60 + lo.at.minute
-        elif lo.when == AT_PERIOD:
-            minute = next((s for s, _, name in day_spans(runner.schedule, now.date()) if name == lo.period and s), None)
-        if minute is not None and (found is None or minute < found):
-            found = minute
-    return found, []
+def _lights_out_at(house: House, lo: LightsOut, day: date) -> int | None:
+    """The minute a Lights out runs on a day, if it runs at a known time (a
+    period's start: the house's period, as the house runs it)."""
+    if lo.when == AT_TIME and lo.at is not None:
+        return lo.at.hour * 60 + lo.at.minute
+    if lo.when == AT_PERIOD:
+        period = next((p for p in house.schedule.periods if p.name == lo.period), None)
+        if period is not None:
+            start = house.schedule.start_on(period, day)
+            return start.hour * 60 + start.minute
+    return None
+
+
+def _lights_out(house: House, runner: RoomRunner) -> Callable[[date, bool], int | None]:
+    """When a live Lights out covering the room runs on a day (log only ones
+    only say what they would do, so the room carries on)."""
+    covering = [lo for lo in house.lights_outs if lo.mode == LIGHTS_OUT_LIVE and lo.covers(runner.room_id)]
+
+    def at(day: date, workday: bool) -> int | None:
+        found: int | None = None
+        for lo in covering:
+            if not lo.runs_today(Today(day, workday, False, {}))[0]:
+                continue
+            minute = _lights_out_at(house, lo, day)
+            if minute is not None and (found is None or minute < found):
+                found = minute
+        return found
+
+    return at
 
 
 def _intervals(rows: list[tuple[datetime, Any]], start: datetime, end: datetime, holds) -> list[list[int]]:
@@ -149,7 +166,7 @@ async def _history(hass: HomeAssistant, house: House, start: datetime, end: date
     if not wanted:
         return {}
     rows = await get_instance(hass).async_add_executor_job(
-        partial(get_significant_states, hass, start, end, sorted(wanted), None, True, False, True, True)
+        partial(get_significant_states, hass, start, end, sorted(wanted), None, True, True, True, True)
     )
     return {entity: [(at, state) for at, state, _ in _rows(rows.get(entity, []))] for entity in wanted}
 
@@ -182,7 +199,9 @@ def _room_history(hass: HomeAssistant, house: House, runner: RoomRunner, rows: d
         if after != before:
             edges.append((at, after))
     on_spans = _intervals(edges, start, now, lambda v: v)
-    on = [[a, b, status_at((a + b) / 2) == "owned"] for a, b in on_spans]
+    # Owned: the room put them on. A room in log only doesn't (the old wiring does).
+    live = runner.mode == MODE_LIVE
+    on = [[a, b, live and status_at((a + b) / 2) == "owned"] for a, b in on_spans]
 
     # Changes by hand: from the room's own log (live rooms only).
     hand = []
@@ -190,10 +209,12 @@ def _room_history(hass: HomeAssistant, house: House, runner: RoomRunner, rows: d
         if change.room_id != runner.room_id or change.kind != ADJUSTED or change.at < start:
             continue
         a = _minute(change.at)
+        # A hand change holds until the lights go off, and for its minutes or until the routine moves on.
+        b = next((_minute(at) for at, value in status if at > change.at and value == "idle"), _minute(now))
         if runner.config.hand_hold == FOR_MINUTES:
-            b = a + int(runner.config.hand_minutes)
-        else:
-            b = next((_minute(at) for at, value in status if at > change.at and value == "idle"), _minute(now))
+            b = min(b, a + int(runner.config.hand_minutes))
+        elif runner.config.hand_hold == MOVES_ON:
+            b = min(b, next((s for s, _, _ in day_spans(runner.schedule, start.date()) if s > a), b))
         hand.append([a, max(a + 1, min(b, _minute(now)))])
 
     held: dict[str, list] = {}
@@ -229,12 +250,13 @@ async def timeline_data(hass: HomeAssistant, house: House) -> dict[str, Any]:
         if runner.mode == MODE_OFF:
             rooms.append({**base, "group": "off"})
             continue
-        minute, _ = _lights_out_minute(house, runner, now)
+        lights_out = _lights_out(house, runner)
         facts = DayFacts(
             today=now.date(), workday_today=today.workday, dark_possible=house.tracks.enabled,
             dark_periods=tuple(house.dark_periods()), auto_dim=house.tracks.factor, sun_down=sun_down,
-            lights_out=minute,
+            lights_out=lights_out, house_schedule=house.schedule,
         )
+        minute = lights_out(now.date(), facts.workday(now.date()))
         house_rules = [(i, r) for i, r in enumerate(house.house_rules) if r.applies_to(runner.room_id)]
         entities = {r.when.entity for r in runner.rules} | {s.when.entity for s in runner.config.signals}
         entities |= set(runner.config.lights)
@@ -263,9 +285,7 @@ async def timeline_data(hass: HomeAssistant, house: House) -> dict[str, Any]:
         "dark_periods": list(house.dark_periods()) if house.tracks.enabled else [],
         "lights_outs": [
             {"name": lo.name, "mode": lo.mode, "style": lo.style, "text": house.describe_lights_out(lo),
-             "minute": (lo.at.hour * 60 + lo.at.minute) if lo.when == AT_TIME and lo.at else
-             next((s for s, _, n in day_spans(house.schedule, now.date()) if n == lo.period), None)
-             if lo.when == AT_PERIOD else None,
+             "minute": _lights_out_at(house, lo, now.date()),
              "whole_house": lo.whole_house, "rooms": list(lo.rooms)}
             for lo in house.lights_outs if lo.mode != LIGHTS_OUT_OFF
         ],

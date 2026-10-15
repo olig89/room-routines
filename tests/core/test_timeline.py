@@ -70,11 +70,63 @@ def test_an_all_day_routine_runs_from_its_timer_to_lights_out_with_its_blend():
     assert morning == []  # the room starts at 09:00, so Morning never shows
 
 
-def test_workday_timers_split_the_week():
+def test_workday_timers_split_the_week_and_each_day_starts_as_the_day_before_ended():
     lanes = room_lanes(office(timers=(Timer(time(8, 30), days="workdays"),)), SCHEDULE, facts(lights_out=60))
-    labels = [l.label for l in lanes]
-    assert labels == ["Mon–Fri", "Sat, Sun"]
-    assert lanes[0].today and lanes[1].bands == () and not lanes[1].note  # weekends: off all day
+    by_label = {l.label: l for l in lanes}
+    assert list(by_label) == ["Tue, Wed, Thu, Fri", "Sat", "Sun", "Mon"]
+    assert by_label["Tue, Wed, Thu, Fri"].today
+    assert by_label["Tue, Wed, Thu, Fri"].bands[0].start == 0  # on from the night before until Lights out
+    assert by_label["Mon"].bands[0].start == 510  # Sunday didn't run
+    [(start, end)] = [(b.start, b.end) for b in by_label["Sat"].bands]
+    assert (start, end) == (0, 60)  # on from Friday until Lights out, then off all weekend
+    assert by_label["Sun"].bands == () and not by_label["Sun"].note
+
+
+def test_a_lights_out_counts_only_on_the_days_it_runs():
+    workdays_only = lambda day, workday: 60 if workday else None  # noqa: E731
+    lanes = room_lanes(office(), SCHEDULE, facts(lights_out=workdays_only))
+    by_label = {l.label: l for l in lanes}
+    assert by_label["Sat, Sun"].bands[0].start == 0 and by_label["Sat, Sun"].bands[-1].end == 1440  # on all weekend
+    assert by_label["Mon–Fri"].bands[0].end == 60
+
+
+def test_no_blend_into_the_same_period_before_midnight():
+    [lane] = room_lanes(office(blends={"Overnight": 30}), SCHEDULE, facts(lights_out=60))
+    assert not any(b.blend_period == "Overnight" for b in lane.bands)
+    assert lane.bands[-1].end == 1440 and lane.bands[-1].blend_to is None
+
+
+def test_motion_outside_the_routine_is_a_visit_and_the_someone_row_follows_the_routine():
+    config = office(triggers=("binary_sensor.motion",), someone_looks={"Bedtime": BRIGHT},
+                    timers=(Timer(time(9, 0)), Timer(time(21, 0), action="off")))
+    lanes = room_lanes(config, SCHEDULE, facts())
+    someone, base = lanes[0], lanes[1]
+    [boost] = someone.bands
+    assert (boost.start, boost.end) == (1200, 1260)  # only while the routine runs
+    early = next(b for b in base.bands if b.start <= 420 < b.end)
+    assert early.visit  # before 09:00 motion lights the room
+    late = next(b for b in base.bands if b.start <= 1300 < b.end)
+    assert late.visit and late.look == BRIGHT  # after 21:00, Bedtime's Someone's there look
+    assert not next(b for b in base.bands if b.start <= 600 < b.end).visit
+
+
+def test_a_dark_only_timer_needs_the_dark_day_track_or_the_sun_down():
+    config = office(timers=(Timer(time(18, 0), only_dark=True),), dim_looks={"Day": DIM})
+    lanes = room_lanes(config, SCHEDULE, facts(dark_possible=True))
+    assert all(l.bands == () for l in lanes)  # 18:00 is outside the dark periods and the sun is up
+    lanes = room_lanes(config, SCHEDULE, facts(dark_possible=True, sun_down=lambda m: m >= 1020))
+    assert any(b.start <= 1100 < b.end for l in lanes for b in l.bands)
+
+
+def test_a_dark_day_lane_follows_the_house_periods():
+    own = SCHEDULE.with_starts({"Day": time(10, 0)})  # the room's Day starts later than the house's
+    lanes = room_lanes(toilet(dim_looks={"Morning": NIGHT}), own,
+                       facts(dark_possible=True, dark_periods=("Morning",), house_schedule=SCHEDULE))
+    dark = next(l for l in lanes if l.dark)
+    assert next(b for b in dark.bands if b.start <= 400 < b.end).track == "dim"
+    # 09:30 is still the room's Morning, but the house's Day: the Dark Day track has ended.
+    late = next(b for b in dark.bands if b.start <= 570 < b.end)
+    assert late.track == "normal" and late.period == "Morning"
 
 
 def test_a_dark_day_lane_only_where_it_differs():
@@ -96,7 +148,7 @@ def test_dark_day_brightness_makes_a_lane_with_its_factor():
 
 def test_rule_lanes_show_the_whole_day_as_it_goes_while_the_rule_holds():
     bedtime = Rule(Condition("binary_sensor.baby_bedtime"), action="look", scene="scene.nightlight")
-    house = Rule(Condition("person.someone", "not_home"), action="nothing")
+    house = Rule(Condition("person.someone", "home", negate=True), action="nothing")
     cap = Rule(Condition("input_boolean.film"), action="cap", max_pct=20)
     lanes = room_lanes(toilet(rules=(bedtime, cap)), SCHEDULE, facts(), house_rules=[(3, house)],
                        names={"binary_sensor.baby_bedtime": "Baby bedtime"})
@@ -108,6 +160,7 @@ def test_rule_lanes_show_the_whole_day_as_it_goes_while_the_rule_holds():
     assert band.look == Look(scene="scene.nightlight") and band.period == "All day"
     assert all(b.cap == 20 for b in lanes[2].bands)
     assert lanes[3].bands == () and "Does nothing" in lanes[3].note
+    assert lanes[3].label == "While person.someone isn't home"
 
 
 def test_inform_lanes_in_priority_order():
