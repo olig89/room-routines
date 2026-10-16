@@ -133,6 +133,10 @@ function tlColours(look) {
 }
 const tlMid = (cs) => cs[0].map((_, i) => Math.round(cs.reduce((t, c) => t + c[i], 0) / cs.length));
 const tlPct = (m) => `${(m / 1440) * 100}%`;
+// A wait in seconds, as people say it ("5 min", "30 s").
+const durText = (secs) => (secs >= 60 && secs % 60 === 0 ? `${secs / 60} min` : `${secs} s`);
+// The periods that go dark sooner or later than the room's usual wait.
+const periodTimeouts = (s) => Object.entries(s.timeouts || {}).map(([p, t]) => `${durText(Number(t))} in ${p}`);
 const tlTime = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 
 class RoomRoutinesPanel extends HTMLElement {
@@ -552,7 +556,7 @@ class RoomRoutinesPanel extends HTMLElement {
     const blends = Object.entries(s.blends || {});
     if (blends.length) bits.push(blends.map(([p, m]) => `${esc(p)} blends into the next period over ${esc(m)} min`).join(", "));
     const timeouts = Object.entries(s.timeouts || {});
-    if (timeouts.length) bits.push(timeouts.map(([p, t]) => `goes dark ${esc(t)} s after it empties in ${esc(p)}`).join(", "));
+    if (timeouts.length) bits.push(timeouts.map(([p, t]) => `goes dark ${esc(durText(Number(t)))} after it empties in ${esc(p)}`).join(", "));
     if ((s.timers || []).length) bits.push(`${s.timers.length} timer${s.timers.length === 1 ? "" : "s"}`);
     if (!bits.length) return "";
     const differs = room.period && room.period !== d.house.period;
@@ -697,7 +701,7 @@ class RoomRoutinesPanel extends HTMLElement {
         ${s.triggers.length ? `<div>Switches on when ${s.triggers.map((t) => `<b>${esc(this._name(t))}</b>`).join(" or ")} sees someone${s.threshold_lux != null && s.lux_sensor ? ` and it's darker than <b>${esc(s.threshold_lux)} lx</b>` : ""}.</div>` : ""}
         ${s.holds.length ? `<div>Kept on while ${s.holds.map((t) => `<b>${esc(this._name(t))}</b>`).join(" or ")} sees someone.</div>` : ""}
         ${room.has_sensors
-          ? `<div>Goes dark <b>${esc(s.timeout_s)} s</b> after the room empties, fading out over <b>${esc(s.fade_out_s)} s</b>.</div>
+          ? `<div>Goes dark <b>${esc(durText(s.timeout_s ?? ROOM_DEFAULTS.timeout_s))}</b> after the room empties${periodTimeouts(s).length ? ` (${periodTimeouts(s).map(esc).join(", ")})` : ""}, fading out over <b>${esc(s.fade_out_s)} s</b>.</div>
         <div>After a light is switched off by hand, motion is ignored for <b>${esc(s.cooldown_s)} s</b>.</div>`
           : `<div>No sensors: the routine starts from ${(s.timers || []).some((t) => t.action !== "off") ? "its timers, " : ""}${s.on_by_hand === "routine" ? "the lights being switched on another way, " : ""}the <b>Start the routine</b> button or the <code>room_routines.switch_on</code> action, and runs until the lights are switched off.</div>`}
         ${(s.ends || []).length ? `<div>Goes dark at once, without waiting or fading, when ${s.ends.map((t) => `<b>${esc(this._name(t))}</b>`).join(" or ")} goes off.</div>` : ""}
@@ -1006,7 +1010,7 @@ class RoomRoutinesPanel extends HTMLElement {
     if ((s.triggers || []).length || (s.holds || []).length) {
       bits.push(`${(s.triggers || []).map((e) => esc(this._name(e))).join(" or ") || "no trigger"}${(s.holds || []).length ? `, held by ${(s.holds || []).map((e) => esc(this._name(e))).join(", ")}` : ""}`);
       const timeout = s.timeout_s ?? ROOM_DEFAULTS.timeout_s;
-      if (r.group === "someone") bits.push(`off ${timeout >= 60 ? `${Math.round(timeout / 60)} min` : `${timeout} s`} after the last movement`);
+      if (r.group === "someone") bits.push(`off ${durText(timeout)} after the last movement${periodTimeouts(s).length ? ` (${periodTimeouts(s).map(esc).join(", ")})` : ""}`);
       if (s.threshold_lux != null && (s.lux_sensors || []).length) bits.push(`only below ${s.threshold_lux} lx`);
     }
     for (const t of s.timers || []) bits.push(esc(this._timerText(t)));
