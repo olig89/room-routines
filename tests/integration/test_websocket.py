@@ -67,10 +67,12 @@ async def test_add_edit_and_remove_a_room(hass, ws):
     assert entry.options["rooms"][room_id]["name"] == "Pantry"
     assert hass.states.get("sensor.pantry_routine_status") is not None
 
-    await ws.send_json({"id": 2, "type": "room_routines/save_room", "room_id": room_id, "room": {**room, "timeout_s": 120}})
+    await ws.send_json({"id": 2, "type": "room_routines/save_room", "room_id": room_id,
+                        "room": {**room, "timeout_s": 120, "timeouts": {"Overnight": 30}}})
     assert (await ws.receive_json())["success"]
     await hass.async_block_till_done()
     assert entry.options["rooms"][room_id]["timeout_s"] == 120
+    assert entry.options["rooms"][room_id]["timeouts"] == {"Overnight": 30}  # sooner dark at night
 
     await ws.send_json({"id": 3, "type": "room_routines/save_room", "room": {**room, "lights": []}})
     reply = await ws.receive_json()

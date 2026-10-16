@@ -180,6 +180,7 @@ def room_from(data: Mapping[str, Any]) -> RoomConfig:
         hand_minutes=float(data.get("hand_minutes") or 20),
         ends=tuple(data.get("ends") or ()),
         blends={str(p): float(m) for p, m in (data.get("blends") or {}).items() if m},
+        timeouts={str(p): timedelta(seconds=int(s)) for p, s in (data.get("timeouts") or {}).items() if s is not None},
         period_starts={str(p): _time(t) for p, t in (data.get("period_starts") or {}).items() if t},
         timers=tuple(timer_from(t) for t in data.get("timers") or ()),
         starters=tuple(condition_from(c) for c in data.get("starters") or ()),

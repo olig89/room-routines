@@ -876,10 +876,9 @@ class RoomRunner:
                 self._notify()
             return
         if self._plain_out_timer is None:
-            out["at"] = dt_util.now() + self.config.timeout
-            self._plain_out_timer = async_call_later(
-                self.hass, self.config.timeout.total_seconds(), self._plain_out_due
-            )
+            timeout = self.config.timeout_in(self.period_now(dt_util.now()))
+            out["at"] = dt_util.now() + timeout
+            self._plain_out_timer = async_call_later(self.hass, timeout.total_seconds(), self._plain_out_due)
             self._notify()
 
     @callback

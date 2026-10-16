@@ -63,6 +63,18 @@ def test_leaving_counts_down_then_switches_off():
     assert r.state is State.IDLE
 
 
+def test_a_period_can_go_dark_sooner_once_empty():
+    kitchen = RoomConfig("Kitchen", lights=(CEILING,), triggers=(MOTION,), looks={"Day": uniform((CEILING,))},
+                         timeout=timedelta(minutes=15), timeouts={"Overnight": timedelta(minutes=5)})
+    night = room(kitchen, period="Overnight")
+    night.sensor(MOTION, True, at(28, 2))
+    d = night.sensor(MOTION, False, at(28, 2, 1))
+    assert only(d, WakeAt).at == at(28, 2, 6) and "300 s" in d.reason
+    evening = room(kitchen, period="Evening")  # no time of its own: the room's usual 15 minutes
+    evening.sensor(MOTION, True, at(28, 20))
+    assert only(evening.sensor(MOTION, False, at(28, 20, 1)), WakeAt).at == at(28, 20, 16)
+
+
 def test_motion_again_cancels_the_countdown():
     r = room()
     r.sensor(MOTION, True, at(28, 20))

@@ -16,7 +16,7 @@ be a Home Assistant scene. A light switched on by hand is left alone, and change
 made by hand are remembered so the page can suggest better looks or times. Each
 room can run in log-only mode first.
 
-**Status: early development (0.13.0).** Install through HACS as a custom repository.
+**Status: early development (0.13.1).** Install through HACS as a custom repository.
 
 ## What you get
 

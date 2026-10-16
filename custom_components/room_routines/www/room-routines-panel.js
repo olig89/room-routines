@@ -7,7 +7,7 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.13.0";
+const PANEL_VERSION = "0.13.1";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
@@ -551,6 +551,8 @@ class RoomRoutinesPanel extends HTMLElement {
     if (starts.length) bits.push(`its own times: ${starts.map(([p, t]) => `${esc(p)} from ${esc(t)}`).join(", ")}`);
     const blends = Object.entries(s.blends || {});
     if (blends.length) bits.push(blends.map(([p, m]) => `${esc(p)} blends into the next period over ${esc(m)} min`).join(", "));
+    const timeouts = Object.entries(s.timeouts || {});
+    if (timeouts.length) bits.push(timeouts.map(([p, t]) => `goes dark ${esc(t)} s after it empties in ${esc(p)}`).join(", "));
     if ((s.timers || []).length) bits.push(`${s.timers.length} timer${s.timers.length === 1 ? "" : "s"}`);
     if (!bits.length) return "";
     const differs = room.period && room.period !== d.house.period;
@@ -1181,7 +1183,7 @@ class RoomRoutinesPanel extends HTMLElement {
     if (room) {
       this._roomDraft = { id: room.id, name: room.name, area_id: room.area_id, mode: room.mode, ...JSON.parse(JSON.stringify(room.settings)) };
     } else {
-      this._roomDraft = { id: null, name: "", area_id: null, lights: [], triggers: [], holds: [], lux_sensors: [], self_fading: [], on_by_hand: "leave", hand_hold: "minutes", hand_minutes: 20, ends: [], blends: {}, period_starts: {}, timers: [], starters: [], only_when: [], rules: [], signals: [], ...ROOM_DEFAULTS };
+      this._roomDraft = { id: null, name: "", area_id: null, lights: [], triggers: [], holds: [], lux_sensors: [], self_fading: [], on_by_hand: "leave", hand_hold: "minutes", hand_minutes: 20, ends: [], blends: {}, timeouts: {}, period_starts: {}, timers: [], starters: [], only_when: [], rules: [], signals: [], ...ROOM_DEFAULTS };
     }
     const r = this._roomDraft;
     r.on_by_hand = r.on_by_hand || "leave";
@@ -1190,6 +1192,7 @@ class RoomRoutinesPanel extends HTMLElement {
     r.hand_minutes = r.hand_minutes || 20;
     r.ends = [...(r.ends || [])];
     r.blends = { ...(r.blends || {}) };
+    r.timeouts = { ...(r.timeouts || {}) };
     r.period_starts = { ...(r.period_starts || {}) };
     r.timers = (r.timers || []).map((t) => ({ ...t, weekdays: [...(t.weekdays || [])], only_home: [...(t.only_home || [])] }));
     r.starters = (r.starters || []).map((c) => ({ ...c }));
@@ -1297,14 +1300,15 @@ class RoomRoutinesPanel extends HTMLElement {
       </select><span class="help">Only the lights you change are left alone; the room's other lights carry on with the routine. "Moves on" means a new period starts, the day turns into a Dark Day or back, a rule starts or ends, or someone arrives or leaves. Then the light goes back to what the room is doing.</span></label>
       ${r.hand_hold === "minutes" ? `<label>For <span class="inputunit"><input type="number" min="1" max="1440" step="5" value="${esc(r.hand_minutes)}" data-room-field="hand_minutes" aria-label="Minutes"> min</span></label>` : ""}
       <table class="plain periods">
-        <tr><th>Period</th><th>This room's start</th><th>Blend into the next period over</th></tr>
+        <tr><th>Period</th><th>This room's start</th><th>Blend into the next period over</th>${r.triggers.length || r.holds.length ? "<th>Go dark once empty for</th>" : ""}</tr>
         ${order.map((p) => `<tr>
           <td><span class="dot" style="background:${this._periodColour(p)}"></span>${esc(p)}</td>
           <td><input type="time" value="${esc(r.period_starts[p] || "")}" data-own-start="${esc(p)}" aria-label="${esc(p)} starts in this room"> <small class="muted">house: ${esc(houseStart(p))}</small></td>
           <td><span class="inputunit"><input type="number" min="0" max="1440" step="5" value="${esc(r.blends[p] || "")}" data-blend="${esc(p)}" placeholder="0" aria-label="Blend minutes"> min</span></td>
+          ${r.triggers.length || r.holds.length ? `<td><span class="inputunit"><input type="number" min="0" max="7200" step="30" value="${esc(r.timeouts[p] ?? "")}" data-period-timeout="${esc(p)}" placeholder="${esc(r.timeout_s ?? ROOM_DEFAULTS.timeout_s)}" aria-label="${esc(p)}: seconds empty before going dark"> s</span></td>` : ""}
         </tr>`).join("")}
       </table>
-      <span class="help">Leave a start empty to use the house's time; set one to move a period for this room only (an office's Evening after the working day). Blending moves brightness and colour gradually from one period's look to the next's over the minutes before it starts, while the routine runs (looks that set a level and colour; a look of last brightness or a scene from another app doesn't blend).</span>
+      <span class="help">Leave a start empty to use the house's time; set one to move a period for this room only (an office's Evening after the working day). A period's "go dark" time replaces the room's usual one in that period (shorter at night, say); leave it empty to use the usual one. Blending moves brightness and colour gradually from one period's look to the next's over the minutes before it starts, while the routine runs (looks that set a level and colour; a look of last brightness or a scene from another app doesn't blend).</span>
       <h3>Timers</h3>
       ${timers || `<div class="meta">None.</div>`}
       <div class="row"><button class="btn small" data-action="timer-add">Add a timer</button></div>
@@ -1903,6 +1907,12 @@ class RoomRoutinesPanel extends HTMLElement {
         else delete this._roomDraft.period_starts[el.dataset.ownStart];
       })
     );
+    root.querySelectorAll("[data-period-timeout]").forEach((el) =>
+      el.addEventListener("change", () => {
+        if (el.value === "") delete this._roomDraft.timeouts[el.dataset.periodTimeout];
+        else this._roomDraft.timeouts[el.dataset.periodTimeout] = Math.max(0, Math.min(7200, Math.round(Number(el.value) || 0)));
+      })
+    );
     root.querySelectorAll("[data-blend]").forEach((el) =>
       el.addEventListener("change", () => {
         const m = Number(el.value);
@@ -2411,6 +2421,7 @@ class RoomRoutinesPanel extends HTMLElement {
           hand_minutes: Math.max(1, Math.min(1440, Number(r.hand_minutes) || 20)),
           ends: r.ends.filter((e) => r.triggers.includes(e) || r.holds.includes(e)),
           blends: r.blends,
+          timeouts: r.timeouts,
           period_starts: r.period_starts,
           starters: this._cleanConds(r.starters),
           only_when: this._cleanConds(r.only_when),

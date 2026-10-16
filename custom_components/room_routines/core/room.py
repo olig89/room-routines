@@ -165,6 +165,8 @@ class RoomConfig:
     ends: tuple[str, ...] = ()
     # Blend into the next period over the last N minutes of a period: {period: minutes}.
     blends: Mapping[str, float] = field(default_factory=dict)
+    # Some periods go dark sooner (or later) once the room empties: {period: timeout}.
+    timeouts: Mapping[str, timedelta] = field(default_factory=dict)
     # The room's own start times for some periods: {period: time}. The house's otherwise.
     period_starts: Mapping[str, time] = field(default_factory=dict)
     timers: tuple[Timer, ...] = ()
@@ -194,6 +196,8 @@ class RoomConfig:
             raise ValueError(f"only the room's own sensors can end a visit, not {sorted(stray_ends)}")
         if any(m < 0 for m in self.blends.values()):
             raise ValueError("blend minutes can't be negative")
+        if any(t < timedelta(0) for t in self.timeouts.values()):
+            raise ValueError("a period's timeout can't be negative")
         for signal in self.signals:
             stray = set(signal.lights) - set(self.lights)
             if stray:
@@ -218,6 +222,10 @@ class RoomConfig:
     def base_layer(self) -> Layer:
         """The layer the room's looks belong to: Someone's there with sensors, else Ambient."""
         return Layer.SOMEONE if self.has_sensors else Layer.AMBIENT
+
+    def timeout_in(self, period: str | None) -> timedelta:
+        """How long the room waits, empty, before going dark in a period."""
+        return self.timeouts.get(period or "", self.timeout)
 
     def switchable(self) -> tuple[str, ...]:
         """The lights the room may switch off: never a power circuit."""
@@ -764,9 +772,10 @@ class Room:
                 return self._decide("occupied again: countdown cancelled")
             return None
         if self.deadline is None:
-            self.deadline = now + self.config.timeout
+            timeout = self.config.timeout_in(self.period)
+            self.deadline = now + timeout
             return self._decide(
-                f"empty: lights off in {int(self.config.timeout.total_seconds())} s",
+                f"empty: lights off in {int(timeout.total_seconds())} s",
                 WakeAt(self.deadline),
             )
         return None
@@ -1068,9 +1077,10 @@ class Room:
                 return self._decide(f"{name}: someone's here again, waiting for the room to empty")
             return None
         if self.lights_out_at is None:
-            self.lights_out_at = now + self.config.timeout
+            timeout = self.config.timeout_in(self.period)
+            self.lights_out_at = now + timeout
             return self._decide(
-                f"{name}: empty, lights off in {int(self.config.timeout.total_seconds())} s",
+                f"{name}: empty, lights off in {int(timeout.total_seconds())} s",
                 WakeAt(self.lights_out_at),
             )
         if now >= self.lights_out_at:

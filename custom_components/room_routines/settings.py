@@ -95,6 +95,10 @@ def clean_room(user_input: Mapping[str, Any], previous: Mapping[str, Any] | None
     room["blends"] = {
         str(p): int(m) for p, m in (user_input.get("blends", room.get("blends")) or {}).items() if m
     }
+    room["timeouts"] = {
+        str(p): int(s) for p, s in (user_input.get("timeouts", room.get("timeouts")) or {}).items()
+        if s is not None and s != ""
+    }
     room["period_starts"] = {
         str(p): str(t)[:5] for p, t in (user_input.get("period_starts", room.get("period_starts")) or {}).items() if t
     }
@@ -355,7 +359,7 @@ def set_periods(
             _carry_removed(old_order, old_looks, looks, renames, names, normal)
             room[key] = looks
         # A room's own times and blends follow the period too.
-        for key in ("blends", "period_starts"):
+        for key in ("blends", "timeouts", "period_starts"):
             if room.get(key):
                 moved = {}
                 for period, value in room[key].items():
