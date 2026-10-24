@@ -52,3 +52,13 @@ def test_reference_needs_enough_readings_and_round_trips():
     ref.learn([(20.0, True, 5000.0)] * 6, days=0)
     assert DaylightReference.from_dict(ref.to_dict()).lookup(21, True) == 5000.0
     assert bucket(21.9, True) == "am10"
+
+
+def test_a_low_sun_height_is_learned_from_several_days():
+    # A low autumn sun passes 2° of height in 3-5 readings a day: too few from one
+    # day, enough from the days kept together.
+    ref = DaylightReference()
+    ref.learn([(6.0, True, 400.0)] * 4, days=1)
+    assert ref.lookup(6.5, True) is None
+    ref.learn([(6.0, True, 400.0)] * 4 * 10, days=1)
+    assert ref.lookup(6.5, True) == 400.0

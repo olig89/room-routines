@@ -16,7 +16,7 @@ from custom_components.room_routines.const import DOMAIN
 from custom_components.room_routines.core.habits import Change
 from custom_components.room_routines.core.looks import LightTarget
 from custom_components.room_routines.core.room import ADJUSTED
-from custom_components.room_routines.house import House, scene_lights
+from custom_components.room_routines.house import LEARN_DAYS, House, scene_lights
 
 from .test_integration import CEILING, LUX, MODE, MONDAY_EVENING, MOTION, STATUS, motion, options, wait
 
@@ -213,6 +213,31 @@ async def test_the_light_sensor_learns_a_clear_day_from_its_statistics(hass, lig
     assert track.attributes["light_sensor_pct"] == 20.0  # 2000 of a clear 10000 lx
     assert track.state == "dim"
     assert entry.options["tracks"]["sensor"] == WINDOW
+
+
+async def test_each_learning_reads_the_whole_window_kept(hass, lights, freezer):
+    freezer.move_to(MONDAY_NOON)
+    await start(hass, window="2000", periods=("Day",), weather=False)
+    h = house(hass)
+    hass.config.components.add("recorder")
+    starts = []
+
+    def stats(_hass, start, *_args):
+        starts.append(start)
+        return {}
+
+    with (
+        patch("homeassistant.components.recorder.get_instance") as instance,
+        patch("homeassistant.components.recorder.statistics.statistics_during_period", side_effect=stats),
+    ):
+        async def run(func, *args):
+            return func(*args)
+
+        instance.return_value.async_add_executor_job = run
+        await h._learn()
+        freezer.tick(timedelta(days=1))
+        await h._learn()  # the next night: still the whole window, not just the last day
+    assert starts[-1] == dt_util.utcnow() - timedelta(days=LEARN_DAYS)
 
 
 # ---- scene looks -----------------------------------------------------------------

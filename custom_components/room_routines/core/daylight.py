@@ -7,7 +7,9 @@ kept apart, since a window sees them differently) the reference is how bright
 the sensor reads on a clear day, taken as the upper end (90th percentile) of
 what it has read at that sun height recently.
 
-It is learned from Home Assistant's own 5-minute statistics once a day. Old
+It is learned from Home Assistant's own 5-minute statistics once a day, each
+time from the whole window kept (about 10 days): at a low sun a sun height
+passes in a few readings, too few from a single day. Old
 references fade slowly (``FADE`` a day), so a bright day from last season
 doesn't set the bar for ever, and a sun height needs ``MIN_SAMPLES`` readings
 before it counts.

@@ -1588,8 +1588,8 @@ class House:
         self._background(self._learn(), "learn what a clear day looks like")
 
     async def _learn(self) -> None:
-        """Read the sensors' 5-minute statistics since the last time and fold them
-        into their clear-day reference."""
+        """Read the sensors' 5-minute statistics for the whole window kept and fold
+        them into their clear-day reference."""
         if "recorder" not in self.hass.config.components:
             return
         from homeassistant.components.recorder import get_instance
@@ -1599,7 +1599,10 @@ class House:
         end = dt_util.utcnow()
         for sensor in (s for s in (self.tracks.sensor, self.tracks.fallback) if s):
             last = self._learned.get(sensor)
-            start = max(last, end - timedelta(days=LEARN_DAYS)) if last else end - timedelta(days=LEARN_DAYS)
+            # Always the whole window, not just since last time: a low sun climbs
+            # through a sun height in fewer than MIN_SAMPLES readings a day, so a
+            # single day would never refresh it.
+            start = end - timedelta(days=LEARN_DAYS)
             try:
                 rows = await get_instance(self.hass).async_add_executor_job(
                     statistics_during_period, self.hass, start, end, {sensor}, "5minute", None, {"mean"}
