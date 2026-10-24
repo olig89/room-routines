@@ -15,7 +15,8 @@
       "no_name": "Give the room a name.",
       "invalid_room": "A room needs at least one light and at least one sensor that can switch the lights on. A sensor can't have both roles in the same room.",
       "invalid_periods": "Every period needs a name of its own and a start time no other period uses on the same days.",
-      "last_period": "There has to be at least one period."
+      "last_period": "There has to be at least one period.",
+      "invalid_tracks": "The Dark Day percentage must be lower than the Normal one."
     },
     "step": {
       "init": {
@@ -24,7 +25,8 @@
           "add_room": "Add a room",
           "pick_room": "Change a room",
           "remove_room": "Remove a room",
-          "periods": "Periods"
+          "periods": "Periods",
+          "dark_days": "Dark Days"
         }
       },
       "add_room": {
@@ -139,10 +141,35 @@
           "alt_start": "Starts at, on the days with different times",
           "remove": "Remove this period"
         }
+      },
+      "dark_days": {
+        "title": "Dark Days",
+        "description": "On a Dark Day, rooms use their Dark Day looks, or their Normal looks at the Dark Day brightness. The day is judged against a clear day at the same height of the sun.",
+        "data": {
+          "on": "Dark Days on",
+          "periods": "Periods Dark Days apply to",
+          "weather": "Use the weather (Open-Meteo sunlight)",
+          "sensor": "Light sensor",
+          "fallback": "Backup light sensor",
+          "first": "Checked first",
+          "dark_below_pct": "Dark Day below this much of a clear day",
+          "normal_above_pct": "Normal again above this much of a clear day",
+          "dark_below_wm2": "Dark Day below this much sunlight (0 = off)",
+          "brightness_pct": "Dark Day brightness for Normal looks"
+        },
+        "data_description": {
+          "sensor": "Optional. Leave empty to judge from the weather alone.",
+          "dark_below_wm2": "Checked against the weather only. Below it, it's a Dark Day whatever a clear day would give."
+        }
       }
     }
   },
   "entity": {
+    "binary_sensor": {
+      "dark_day": {
+        "name": "Dark Day"
+      }
+    },
     "select": {
       "period": {
         "name": "Period"

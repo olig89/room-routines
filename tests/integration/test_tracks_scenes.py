@@ -9,6 +9,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from homeassistant.core import Context, HomeAssistant
+from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
@@ -16,12 +17,15 @@ from custom_components.room_routines.const import DOMAIN
 from custom_components.room_routines.core.habits import Change
 from custom_components.room_routines.core.looks import LightTarget
 from custom_components.room_routines.core.room import ADJUSTED
+from custom_components.room_routines.core.serial import schedule_from
+from custom_components.room_routines.core.tracks import default_periods
 from custom_components.room_routines.house import LEARN_DAYS, House, scene_lights
 
 from .test_integration import CEILING, LUX, MODE, MONDAY_EVENING, MOTION, STATUS, motion, options, wait
 
 WINDOW = "sensor.window_lux"
 TRACK = "select.room_routines_track"
+DARK_DAY = "binary_sensor.room_routines_dark_day"
 SCENE = "scene.wc_evening"
 REAL_FETCH = House._fetch_weather  # kept before the fixture below replaces it
 MONDAY_NOON = "2026-09-28 09:00:00+00:00"  # 12:00 in Tallinn, sun at about 28 degrees
@@ -238,6 +242,70 @@ async def test_each_learning_reads_the_whole_window_kept(hass, lights, freezer):
         freezer.tick(timedelta(days=1))
         await h._learn()  # the next night: still the whole window, not just the last day
     assert starts[-1] == dt_util.utcnow() - timedelta(days=LEARN_DAYS)
+
+
+
+async def test_the_dark_day_binary_sensor_follows_the_day(hass, lights):
+    await start(hass)
+    dark = hass.states.get(DARK_DAY)
+    assert dark.state == "on"
+    assert dark.attributes["reason"] == "the sun is down"
+    assert dark.attributes["chosen_by_hand"] is False
+    # Choosing the day by hand stays on the select; the binary sensor follows it.
+    await hass.services.async_call("select", "select_option", {"entity_id": TRACK, "option": "normal"}, blocking=True)
+    dark = hass.states.get(DARK_DAY)
+    assert dark.state == "off"
+    assert dark.attributes["chosen_by_hand"] is True
+
+
+DARK_DAYS_FORM = {
+    "on": True, "periods": ["Evening"], "weather": True, "first": "weather",
+    "dark_below_pct": 30, "normal_above_pct": 50, "dark_below_wm2": 100, "brightness_pct": 80,
+}
+
+
+async def test_dark_days_can_be_set_from_the_configure_screen(hass, lights):
+    entry = await start(hass)
+    flow = await hass.config_entries.options.async_init(entry.entry_id)
+    assert "dark_days" in flow["menu_options"]
+    flow = await hass.config_entries.options.async_configure(flow["flow_id"], {"next_step_id": "dark_days"})
+    assert flow["step_id"] == "dark_days"
+    suggested = {str(k): k.description.get("suggested_value") for k in flow["data_schema"].schema if k.description}
+    assert suggested["sensor"] == WINDOW  # the form starts from what's set now
+    # The light sensor cleared: left out of the answer.
+    flow = await hass.config_entries.options.async_configure(flow["flow_id"], DARK_DAYS_FORM)
+    assert flow["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    tracks = entry.options["tracks"]
+    assert tracks["sensor"] is None and tracks["fallback"] is None
+    assert tracks["periods"] == ["Evening"]
+    assert (tracks["dark_below_pct"], tracks["normal_above_pct"], tracks["dark_below_wm2"]) == (30, 50, 100)
+    assert tracks["brightness_pct"] == 80
+    track = hass.states.get(TRACK)
+    assert track.attributes["dark_below_pct"] == 30 and track.attributes["light_sensor"] is None
+
+
+async def test_the_configure_screen_refuses_crossed_thresholds(hass, lights):
+    entry = await start(hass)
+    flow = await hass.config_entries.options.async_init(entry.entry_id)
+    flow = await hass.config_entries.options.async_configure(flow["flow_id"], {"next_step_id": "dark_days"})
+    flow = await hass.config_entries.options.async_configure(
+        flow["flow_id"], {**DARK_DAYS_FORM, "dark_below_pct": 60, "normal_above_pct": 50}
+    )
+    assert flow["type"] is FlowResultType.FORM
+    assert flow["errors"] == {"base": "invalid_tracks"}
+    assert entry.options["tracks"]["dark_below_pct"] == 40  # nothing saved
+
+
+async def test_the_default_dark_day_periods_stay_the_default(hass, lights):
+    entry = await start(hass)
+    flow = await hass.config_entries.options.async_init(entry.entry_id)
+    flow = await hass.config_entries.options.async_configure(flow["flow_id"], {"next_step_id": "dark_days"})
+    schedule = schedule_from(entry.options)
+    default = list(default_periods({p.name: p.start for p in schedule.periods}))
+    flow = await hass.config_entries.options.async_configure(flow["flow_id"], {**DARK_DAYS_FORM, "periods": default})
+    assert flow["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options["tracks"]["periods"] is None  # follows later changes to the period times
 
 
 # ---- scene looks -----------------------------------------------------------------

@@ -39,7 +39,7 @@ from .house import House, capture, room_of
 from .settings import LOOK_KEYS, add_area_rooms
 from .websocket import async_register_websocket
 
-PLATFORMS = [Platform.SELECT, Platform.SENSOR, Platform.SWITCH]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.SELECT, Platform.SENSOR, Platform.SWITCH]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 type RoomRoutinesConfigEntry = ConfigEntry[House]
