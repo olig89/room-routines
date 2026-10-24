@@ -1,8 +1,9 @@
 """Setup and options screens.
 
 Setup creates the house with the five default periods and no rooms. The
-options screen then offers: add a room, change a room, remove a room, and the
-periods (start times, add, rename or remove; any number from one up).
+options screen then offers: add a room, change a room, remove a room, the
+periods (start times, add, rename or remove; any number from one up) and Dark
+Days (the same settings as the panel's Dark Day card).
 
 Adding a room asks for its name and area first, then suggests the area's
 lights, motion/presence sensors and light-level sensor. They are suggestions:
@@ -48,8 +49,11 @@ from .core.serial import (
     first_look,
     schedule_from,
     schedule_to,
+    tracks_from,
+    tracks_to,
 )
-from .settings import SettingsError, clean_room, remove_room, set_periods
+from .core.tracks import SENSOR, WEATHER, default_periods
+from .settings import SettingsError, clean_room, remove_room, set_periods, set_tracks
 from .suggest import room_suggestions
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -155,7 +159,7 @@ class RoomRoutinesOptionsFlow(OptionsFlow):
         menu = ["add_room"]
         if self._options()[CONF_ROOMS]:
             menu += ["pick_room", "remove_room"]
-        menu.append("periods")
+        menu += ["periods", "dark_days"]
         return self.async_show_menu(step_id="init", menu_options=menu)
 
     # -- rooms --
@@ -335,3 +339,57 @@ class RoomRoutinesOptionsFlow(OptionsFlow):
             errors=errors,
             description_placeholders={"period": old["name"]},
         )
+
+    # -- Dark Days --
+
+    async def async_step_dark_days(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        options = self._options()
+        schedule = schedule_from(options)
+        names = list(schedule.order())
+        default = list(default_periods({p.name: p.start for p in schedule.periods}))
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            periods = [n for n in names if n in user_input.get("periods", [])]
+            data = {
+                **user_input,
+                # A cleared sensor field is left out of the answer: no sensor.
+                "sensor": user_input.get("sensor"),
+                "fallback": user_input.get("fallback"),
+                # The default daytime periods stay "the default", so they follow
+                # later changes to the period times.
+                "periods": None if periods == default else periods,
+            }
+            try:
+                return self.async_create_entry(data=set_tracks(options, data))
+            except SettingsError:
+                errors["base"] = "invalid_tracks"
+        now = tracks_to(tracks_from(options))
+        shown = {**now, **(user_input or {})}
+        chosen = now["periods"] if now["periods"] is not None else default
+
+        def pct(maximum: int) -> NumberSelector:
+            return NumberSelector(
+                NumberSelectorConfig(min=0, max=maximum, step=1, unit_of_measurement="%", mode=NumberSelectorMode.BOX)
+            )
+
+        fields: dict[Any, Any] = {
+            vol.Required("on", default=shown["on"]): BooleanSelector(),
+            vol.Required("periods", default=[n for n in chosen if n in names]): SelectSelector(
+                SelectSelectorConfig(options=names, multiple=True, mode=SelectSelectorMode.LIST)
+            ),
+            vol.Required("weather", default=shown["weather"]): BooleanSelector(),
+            vol.Optional("sensor", **_suggest(shown, "sensor")): _entities("sensor", False),
+            vol.Optional("fallback", **_suggest(shown, "fallback")): _entities("sensor", False),
+            vol.Required("first", default=shown["first"]): self._choices(
+                [(WEATHER, "The weather"), (SENSOR, "The light sensor")]
+            ),
+            vol.Required("dark_below_pct", default=shown["dark_below_pct"]): pct(200),
+            vol.Required("normal_above_pct", default=shown["normal_above_pct"]): pct(200),
+            vol.Required("dark_below_wm2", default=shown["dark_below_wm2"]): NumberSelector(
+                NumberSelectorConfig(min=0, max=600, step=1, unit_of_measurement="W/m²", mode=NumberSelectorMode.BOX)
+            ),
+            vol.Required("brightness_pct", default=shown["brightness_pct"]): NumberSelector(
+                NumberSelectorConfig(min=1, max=300, step=1, unit_of_measurement="%", mode=NumberSelectorMode.BOX)
+            ),
+        }
+        return self.async_show_form(step_id="dark_days", data_schema=vol.Schema(fields), errors=errors)
