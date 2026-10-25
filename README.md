@@ -38,7 +38,9 @@ room can run in log-only mode first.
   sensor is either one that can switch the lights on or one that can only keep
   them on (any kind of sensor can take either role). Plus a light-level sensor,
   the lux threshold, the timeout, the fade-out (15 s by default), the cooldown
-  after a hand switch-off, and the drift time when the period changes.
+  after a hand switch-off, and the drift time when the period changes. Lights
+  switched off by hand while a sensor still sees someone (lying in the bath)
+  stay off until the room has been empty for its timeout, not just the cooldown.
   Sensors are optional.
 - **Time-based routines** (per room, all optional):
   - **its own period times**: move a period for this room only;

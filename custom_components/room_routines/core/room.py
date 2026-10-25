@@ -33,7 +33,9 @@ must meet, and *rules* that change how the room behaves while something holds
 out which hold and tells the room with ``set_context``.
 
 After someone switches the room's lights off by hand, motion is ignored for
-the cooldown, so a person can leave a room in the dark.
+the cooldown, so a person can leave a room in the dark. If a sensor still sees
+someone then, they're staying in the dark (a bath): motion is ignored until the
+room has been empty for its timeout.
 
 Each sensor has one of two roles, chosen per room. A *trigger* can switch the
 lights on. A *hold* sensor can only keep an owned room occupied, so its false
@@ -125,6 +127,7 @@ BLEND_STEP = timedelta(minutes=2)  # how often a blending room is moved on
 # After a restart, how long a sensor that hasn't reported counts as "someone's there".
 UNHEARD_FOR = timedelta(minutes=15)
 NO_LOOK = "the room has no look to switch on in any period: set one in its looks table"
+KEPT_DARK = "switched off by hand with someone here, dark until the room is empty"
 
 SceneReader = Callable[[str], Mapping[str, LightTarget] | None]
 
@@ -337,6 +340,11 @@ class Room:
         self.unheard_until: datetime | None = None
         self.deadline: datetime | None = None
         self.cooldown_until: datetime | None = None
+        # Switched off by hand while a sensor still saw someone (lying in the
+        # bath): motion is ignored until the room has been empty for its
+        # timeout, counted from ``dark_until``.
+        self.kept_dark = False
+        self.dark_until: datetime | None = None
         self.stealth = stealth
         # Lights changed by hand while the room runs them: left as they were set
         # until each one's time (None: until the lights go off, or until the
@@ -369,7 +377,10 @@ class Room:
     def next_wake(self) -> datetime | None:
         """The earliest time ``tick`` has something to do."""
         times = [
-            t for t in (self.deadline, self.adopt_at, self.unheard_until, self.lights_out_at, self.lights_out_until)
+            t for t in (
+                self.deadline, self.adopt_at, self.unheard_until, self.lights_out_at, self.lights_out_until,
+                self.dark_until,
+            )
             if t is not None
         ]
         times += [until for until in self.hand.values() if until is not None]
@@ -787,6 +798,7 @@ class Room:
         self.hand = {}
         self.adopt_at = None
         self._last_blend = None
+        self._end_dark()  # started on purpose: no longer kept dark
         self._clear_lights_out()  # started on purpose (a timer, a button): Lights out lets go
         self.ambient.lights_changed(True, now)
 
@@ -915,6 +927,8 @@ class Room:
         if self.state is State.MANUAL:
             return self._decide("manual: a light was switched on by hand")
         if self.state is State.IDLE:
+            if self.kept_dark:
+                return self._dark_check(now, on and not was and is_trigger)
             if not (on and not was and is_trigger):
                 return self._decide("idle")
             return self._switch_on(entity, now)
@@ -946,6 +960,8 @@ class Room:
         refused = self.refusal()
         if refused:
             return self._decide(f"motion at {entity}, but {refused}")
+        if self.kept_dark:
+            return self._decide(f"motion at {entity} ignored: {KEPT_DARK}")
         if self.cooldown_until is not None and now < self.cooldown_until:
             return self._decide("motion ignored: lights were just switched off by hand")
         ambient = self.ambient.ambient(now)
@@ -1101,6 +1117,7 @@ class Room:
             return self._unchanged()
         if self.state is State.IDLE:
             if any_on:
+                self._end_dark()  # switched on again by hand: the hand decides now
                 self.state = State.MANUAL
                 if self.config.on_by_hand == ROUTINE:
                     self.adopt_at = now + ADOPT_WAIT
@@ -1134,10 +1151,35 @@ class Room:
         change = self._hand_change(SWITCHED_OFF, now) if self.state is State.OWNED else None
         self._go_idle()
         self.cooldown_until = now + self.config.cooldown
+        if self.someone_seen():
+            # Someone stays in the dark on purpose: the cooldown would let the
+            # next movement switch the lights back on.
+            self.kept_dark = True
+            self.dark_until = None
+            self.last = Decision((), "switched off by hand with someone here: dark until the room is empty", change)
+            return self.last
         self.last = Decision(
             (), f"switched off by hand: motion ignored for {int(self.config.cooldown.total_seconds())} s", change
         )
         return self.last
+
+    def _dark_check(self, now: datetime, motion: bool) -> Decision:
+        """Kept dark: count down while nobody is seen, start again when someone is."""
+        if self.someone_seen():
+            self.dark_until = None
+            return self._decide(f"motion ignored: {KEPT_DARK}" if motion else KEPT_DARK)
+        if self.dark_until is None:
+            timeout = self.config.timeout_in(self.period)
+            self.dark_until = now + timeout
+            return self._decide(
+                f"empty after being switched off by hand: motion works again in {int(timeout.total_seconds())} s",
+                WakeAt(self.dark_until),
+            )
+        return self._unchanged()
+
+    def _end_dark(self) -> None:
+        self.kept_dark = False
+        self.dark_until = None
 
     def lux(self, value: float, now: datetime) -> bool:
         return self.ambient.reading(value, now)
@@ -1249,6 +1291,9 @@ class Room:
                 return countdown
         if (waiting := self._lights_out_check(now)) is not None:
             return waiting
+        if self.dark_until is not None and now >= self.dark_until and not self.someone_seen():
+            self._end_dark()
+            return self._decide("empty since being switched off by hand: motion works again")
         if self.adopt_at is not None and now >= self.adopt_at:
             self.adopt_at = None
             if self.state is State.MANUAL:

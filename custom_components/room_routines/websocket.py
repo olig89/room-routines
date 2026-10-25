@@ -142,6 +142,9 @@ def room_snapshot(hass: HomeAssistant, runner: RoomRunner) -> dict[str, Any]:
         "reason": room.last.reason if room else None,
         "lights_off_at": _iso(room.deadline) if room else None,
         "cooldown_until": _iso(room.cooldown_until) if room else None,
+        # Switched off by hand with someone there: dark until the room is empty.
+        "kept_dark": room.kept_dark if room else False,
+        "dark_until": _iso(room.dark_until) if room else None,
         "sensors": dict(room.sensors) if room else {},
         "ambient": ambient,
         "dark_enough": dark_enough(ambient, runner.config.threshold_lux),
