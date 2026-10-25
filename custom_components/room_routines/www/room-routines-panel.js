@@ -7,7 +7,7 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.14.0";
+const PANEL_VERSION = "0.15.0";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
@@ -511,7 +511,11 @@ class RoomRoutinesPanel extends HTMLElement {
     if (room.blending) bits.push(`blending into ${esc(room.blending.into)} (${Math.round(room.blending.fraction * 100)} %)`);
     if (room.mode === "log_only") bits.push(`<span class="muted">(log only: switching nothing)</span>`);
     if (room.lights_off_at) bits.push(`off in <span data-deadline="${esc(room.lights_off_at)}">${countdown(room.lights_off_at)}</span>`);
-    if (room.cooldown_until && new Date(room.cooldown_until) > new Date()) {
+    if (room.kept_dark) {
+      bits.push(room.dark_until
+        ? `switched off by hand: motion works again in <span data-deadline="${esc(room.dark_until)}">${countdown(room.dark_until)}</span>`
+        : "switched off by hand with someone here: dark until the room is empty");
+    } else if (room.cooldown_until && new Date(room.cooldown_until) > new Date()) {
       bits.push(`ignoring motion until ${esc(hhmmss(room.cooldown_until))}`);
     }
     return bits.join(" · ");
@@ -702,7 +706,7 @@ class RoomRoutinesPanel extends HTMLElement {
         ${s.holds.length ? `<div>Kept on while ${s.holds.map((t) => `<b>${esc(this._name(t))}</b>`).join(" or ")} sees someone.</div>` : ""}
         ${room.has_sensors
           ? `<div>Goes dark <b>${esc(durText(s.timeout_s ?? ROOM_DEFAULTS.timeout_s))}</b> after the room empties${periodTimeouts(s).length ? ` (${periodTimeouts(s).map(esc).join(", ")})` : ""}, fading out over <b>${esc(s.fade_out_s)} s</b>.</div>
-        <div>After a light is switched off by hand, motion is ignored for <b>${esc(s.cooldown_s)} s</b>.</div>`
+        <div>After a light is switched off by hand, motion is ignored for <b>${esc(s.cooldown_s)} s</b>, or, if a sensor still sees someone, until the room has been empty that long.</div>`
           : `<div>No sensors: the routine starts from ${(s.timers || []).some((t) => t.action !== "off") ? "its timers, " : ""}${s.on_by_hand === "routine" ? "the lights being switched on another way, " : ""}the <b>Start the routine</b> button or the <code>room_routines.switch_on</code> action, and runs until the lights are switched off.</div>`}
         ${(s.ends || []).length ? `<div>Goes dark at once, without waiting or fading, when ${s.ends.map((t) => `<b>${esc(this._name(t))}</b>`).join(" or ")} goes off.</div>` : ""}
         <div>Lights switched on another way (a wall switch, an app): <b>${esc(ON_BY_HAND[s.on_by_hand || "leave"])}</b>. A light changed by hand while the room runs it is left as set <b>${esc(this._handText(s))}</b>; the others carry on.</div>

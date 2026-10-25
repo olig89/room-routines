@@ -130,12 +130,54 @@ def test_light_switched_on_by_hand_is_left_alone():
 def test_switched_off_by_hand_ignores_motion_for_the_cooldown():
     r = room()
     r.sensor(MOTION, True, at(28, 20))
-    d = r.lights(False, own=False, now=at(28, 20, 5))
+    r.sensor(MOTION, False, at(28, 20, 4))
+    d = r.lights(False, own=False, now=at(28, 20, 5))  # nobody seen: from an app, say
     assert r.state is State.IDLE and "ignored for 30 s" in d.reason
-    r.sensor(MOTION, False, at(28, 20, 5, 1))
     assert r.sensor(MOTION, True, at(28, 20, 5, 20)).actions == ()
     r.sensor(MOTION, False, at(28, 20, 5, 25))
     assert r.sensor(MOTION, True, at(28, 20, 5, 31)).actions
+
+
+def test_switched_off_by_hand_with_someone_there_stays_dark_until_empty():
+    # A bath: the lights off by hand, then lying still while presence comes and goes.
+    r = room()
+    r.sensor(MOTION, True, at(28, 20))
+    r.sensor(MMWAVE, True, at(28, 20))
+    d = r.lights(False, own=False, now=at(28, 20, 5))
+    assert "dark until the room is empty" in d.reason
+    r.sensor(MOTION, False, at(28, 20, 6))
+    assert r.sensor(MOTION, True, at(28, 20, 10)).actions == ()  # past the cooldown: still dark
+    r.sensor(MOTION, False, at(28, 20, 11))
+    d = r.sensor(MMWAVE, False, at(28, 20, 30))  # presence loses her for a moment
+    assert only(d, WakeAt).at == at(28, 20, 30, 30)
+    r.sensor(MMWAVE, True, at(28, 20, 30, 20))  # back before the timeout: countdown off
+    assert r.tick(at(28, 20, 30, 30)).actions == ()
+    assert r.sensor(MOTION, True, at(28, 20, 40)).actions == ()
+    assert r.state is State.IDLE
+
+
+def test_kept_dark_ends_once_the_room_has_been_empty_for_its_timeout():
+    r = room()
+    r.sensor(MOTION, True, at(28, 20))
+    r.lights(False, own=False, now=at(28, 20, 5))  # switched off on the way out
+    r.sensor(MOTION, False, at(28, 20, 5, 5))
+    assert r.sensor(MOTION, True, at(28, 20, 5, 34)).actions == ()  # coming back too soon
+    r.sensor(MOTION, False, at(28, 20, 5, 40))
+    d = r.tick(at(28, 20, 6, 10))
+    assert "motion works again" in d.reason
+    assert only(r.sensor(MOTION, True, at(28, 20, 7)), ApplyLook)
+
+
+def test_switched_on_by_hand_ends_kept_dark():
+    r = room()
+    r.sensor(MOTION, True, at(28, 20))
+    r.lights(False, own=False, now=at(28, 20, 5))
+    r.lights(True, own=False, now=at(28, 20, 6))
+    assert r.state is State.MANUAL and not r.kept_dark
+    r.lights(False, own=False, now=at(28, 20, 7))  # off again, still there: dark again
+    r.sensor(MOTION, False, at(28, 20, 8))
+    r.tick(at(28, 20, 8, 30))
+    assert only(r.sensor(MOTION, True, at(28, 20, 9)), ApplyLook)
 
 
 def test_dimmed_by_hand_still_switches_off():
