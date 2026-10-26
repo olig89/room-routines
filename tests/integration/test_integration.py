@@ -416,6 +416,14 @@ async def test_entity_ids_stay_short_in_an_area_on_a_floor(hass, lights):
     assert not [s.entity_id for s in hass.states.async_all() if "2f_" in s.entity_id]
 
 
+@pytest.mark.parametrize("name", ["Alex's Office", "Alex’s Office"])
+async def test_entity_ids_drop_apostrophes(hass, lights, name):
+    await setup(hass, mode=None, name=name)
+    assert hass.states.get("select.alexs_office_routine_mode") is not None
+    assert hass.states.get("sensor.alexs_office_routine_status") is not None
+    assert not [s.entity_id for s in hass.states.async_all() if "alex_s" in s.entity_id]
+
+
 async def test_stray_option_keys_are_dropped_on_setup(hass, lights):
     hass.states.async_set(CEILING, "off")
     opts = options()

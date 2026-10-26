@@ -21,6 +21,11 @@ def house_device(house: House) -> DeviceInfo:
 ID_SUFFIX = {"status": "status", "ambient_lux": "light_level", "mode": "mode"}
 
 
+def room_slug(name: str) -> str:
+    """"Alex's Office" -> alexs_office; slugify alone would give alex_s_office."""
+    return slugify(name.replace("'", "").replace("’", ""))
+
+
 class HouseEntity(Entity):
     _attr_has_entity_name = True
     _attr_should_poll = False
@@ -58,7 +63,7 @@ class RoomEntity(Entity):
             name=f"{runner.config.name} routine",
             suggested_area=area,
         )
-        self.entity_id = f"{self._platform_domain}.{slugify(runner.config.name)}_routine_{ID_SUFFIX.get(key, key)}"
+        self.entity_id = f"{self._platform_domain}.{room_slug(runner.config.name)}_routine_{ID_SUFFIX.get(key, key)}"
 
     async def async_added_to_hass(self) -> None:
         signal = room_signal(self.house.entry.entry_id, self.runner.room_id)
