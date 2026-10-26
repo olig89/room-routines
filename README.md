@@ -1,4 +1,16 @@
-# Room Routines
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/olig89/room-routines/main/custom_components/room_routines/brand/dark_logo.png">
+    <img alt="Room Routines" src="https://raw.githubusercontent.com/olig89/room-routines/main/custom_components/room_routines/brand/logo.png" height="72">
+  </picture>
+</p>
+
+<p align="center">
+  <a href="https://hacs.xyz/docs/faq/custom_repositories/"><img alt="HACS custom repository" src="https://img.shields.io/badge/HACS-custom-41BDF5"></a>
+  <a href="https://github.com/olig89/room-routines/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/olig89/room-routines?color=D9822B"></a>
+  <img alt="Home Assistant 2026.9 or later" src="https://img.shields.io/badge/Home%20Assistant-2026.9%2B-18BCF2">
+  <a href="https://github.com/olig89/room-routines/actions/workflows/tests.yml"><img alt="Tests" src="https://github.com/olig89/room-routines/actions/workflows/tests.yml/badge.svg"></a>
+</p>
 
 Lights that follow your household's daily routine, for Home Assistant: by
 motion, by the clock, or both.
