@@ -77,12 +77,12 @@ room can run in log-only mode first.
     switching on, a door opening, someone coming home); unlike a motion sensor it
     doesn't switch the room off when it changes back;
   - **only when**: every way of starting needs all of these (use "isn't" for
-    "not while": baby bedtime isn't on);
+    "not while": quiet hours isn't on);
   - **while X**: rules that hold while an entity is (or isn't) in a state: do
     nothing at all, use another look (a scene or another period's look), or keep
     every light at or below a brightness. A lit room moves to the new look when a
     rule starts or ends. **House rules** do the same for chosen rooms, or every
-    room (away from home, the baby asleep); a room's own rules come first.
+    room (away from home, quiet hours); a room's own rules come first.
 - **Someone's there over a routine** (optional, for rooms with sensors): a
   second looks table, *Someone's there*. While the room's routine runs (a timer,
   a starter, a button, lights switched on by hand), motion moves the lights set

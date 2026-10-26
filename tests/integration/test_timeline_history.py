@@ -28,7 +28,7 @@ async def tick(hass, freezer, seconds):
         await hass.async_block_till_done()
 
 
-async def test_today_so_far(recorder_mock, hass: HomeAssistant, tallinn, hass_ws_client, lights, freezer):
+async def test_today_so_far(recorder_mock, hass: HomeAssistant, helsinki, hass_ws_client, lights, freezer):
     await setup(hass)
     await tick(hass, freezer, 60)
     hass.states.async_set(MOTION, "on")  # the room switches the bathroom on: owned

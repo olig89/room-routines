@@ -25,7 +25,7 @@ The config entry's options hold plain JSON:
           "timers": [{"at": "08:30", "action": "on", "days": "workdays", "only_dark": true,
                       "only_home": ["person.x"]}, ...],
           "starters": [{"entity": "binary_sensor.pc", "state": "on"}, ...],
-          "only_when": [{"entity": "binary_sensor.baby_bedtime", "state": "on", "negate": true}, ...],
+          "only_when": [{"entity": "binary_sensor.quiet_hours", "state": "on", "negate": true}, ...],
           "rules": [{"when": {"entity": "...", "state": "on"}, "action": "nothing" | "look" | "cap",
                      "scene": "scene.x" | "period": "Overnight", "max_pct": 20}, ...],
           "looks": {"<period>": {"nothing": true} | {"scene": "scene.x"} | {"lights": {...}, "blinds": {...}}},

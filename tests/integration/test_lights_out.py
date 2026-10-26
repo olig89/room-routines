@@ -22,14 +22,14 @@ GROUP = "light.downstairs"  # a group of other lights
 RAW = "light.raw"  # hidden behind a template light
 BED = "input_boolean.bedtime"
 SKIP = "switch.room_routines_skip_next_lights_out"
-SUNDAY_LATE = "2026-09-27 21:50:00+00:00"  # 00:50 Monday in Tallinn
+SUNDAY_LATE = "2026-09-27 21:50:00+00:00"  # 00:50 Monday in Helsinki
 ONE_AM = "2026-09-27 22:00:00+00:00"
 
 ON = {"lights": {}}
 
 
 @pytest.fixture(autouse=True)
-async def late(hass: HomeAssistant, tallinn, freezer):
+async def late(hass: HomeAssistant, helsinki, freezer):
     freezer.move_to(SUNDAY_LATE)
 
 

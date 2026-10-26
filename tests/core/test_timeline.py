@@ -147,15 +147,15 @@ def test_dark_day_brightness_makes_a_lane_with_its_factor():
 
 
 def test_rule_lanes_show_the_whole_day_as_it_goes_while_the_rule_holds():
-    bedtime = Rule(Condition("binary_sensor.baby_bedtime"), action="look", scene="scene.nightlight")
+    bedtime = Rule(Condition("binary_sensor.quiet_hours"), action="look", scene="scene.nightlight")
     house = Rule(Condition("person.someone", "home", negate=True), action="nothing")
     cap = Rule(Condition("input_boolean.film"), action="cap", max_pct=20)
     lanes = room_lanes(toilet(rules=(bedtime, cap)), SCHEDULE, facts(), house_rules=[(3, house)],
-                       names={"binary_sensor.baby_bedtime": "Baby bedtime"})
+                       names={"binary_sensor.quiet_hours": "Quiet hours"})
     keys = [(l.key, l.index) for l in lanes]
     assert keys == [("base", None), ("rule", 0), ("rule", 1), ("house_rule", 3)]
     rule = lanes[1]
-    assert rule.label == "While Baby bedtime is on"
+    assert rule.label == "While Quiet hours is on"
     [band] = rule.bands  # the same look all day: one band
     assert band.look == Look(scene="scene.nightlight") and band.period == "All day"
     assert all(b.cap == 20 for b in lanes[2].bands)

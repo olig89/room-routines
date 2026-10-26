@@ -202,7 +202,7 @@ def test_old_lux_settings_carry_over():
     assert not tracks_from({}).on
 
 
-BEDTIME = {"entity": "binary_sensor.baby_bedtime", "state": "on"}
+BEDTIME = {"entity": "binary_sensor.quiet_hours", "state": "on"}
 
 
 def test_a_room_keeps_its_starters_conditions_and_rules():

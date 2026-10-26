@@ -22,7 +22,7 @@ def evening(freezer):
     freezer.move_to(MONDAY_EVENING)
 
 
-async def test_history_and_the_dry_run_check(recorder_mock, hass: HomeAssistant, tallinn, hass_ws_client, lights, freezer):
+async def test_history_and_the_dry_run_check(recorder_mock, hass: HomeAssistant, helsinki, hass_ws_client, lights, freezer):
     await setup(hass, mode="log_only")
     lights.follow = False  # the sensor's own link switches the light, not the room
     await hass.async_block_till_done()

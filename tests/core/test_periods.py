@@ -4,7 +4,7 @@ import pytest
 
 from custom_components.room_routines.core.periods import Period, Schedule, default_schedule
 
-from .conftest import TLL, at
+from .conftest import HEL, at
 
 # 2026-09-28 is a Monday.
 
@@ -51,7 +51,7 @@ def test_alt_days_use_their_own_start_times():
 
 
 def test_clock_change_keeps_wall_clock_starts():
-    # Tallinn falls back from EEST to EET on 2026-10-25.
+    # Helsinki falls back from EEST to EET on 2026-10-25.
     s = default_schedule()
     assert s.current(at(25, 17, 30, month=10)).started == at(25, 17, month=10)
     assert s.current(at(25, 12, month=10)).name == "Day"
@@ -86,5 +86,5 @@ def test_bad_schedules_are_refused(periods):
 
 def test_single_period_is_always_current():
     s = Schedule((Period("All day", time(0)),))
-    now = s.current(datetime(2026, 9, 28, 15, tzinfo=TLL))
+    now = s.current(datetime(2026, 9, 28, 15, tzinfo=HEL))
     assert now.name == now.next_name == "All day"

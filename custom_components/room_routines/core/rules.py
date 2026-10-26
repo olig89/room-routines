@@ -8,7 +8,7 @@ state, or not in it):
   quiet again doesn't switch the room off.
 - **only when**: every way of starting the room (motion, a starter, a timer,
   lights switched on by hand being taken over, the switch_on action) needs all
-  of these to hold. "Not while the baby is asleep" is ``Condition(baby_bedtime,
+  of these to hold. "Not during quiet hours" is ``Condition(quiet_hours,
   "on", negate=True)``.
 - **rules**: while a condition holds, the room behaves differently: it does
   nothing (no starts at all), uses another look (a scene, or another period's
@@ -103,7 +103,7 @@ def describe_condition(condition: Condition, name: str | None = None) -> str:
 
 
 def describe_rule(rule: Rule, name: str | None = None) -> str:
-    """'while Baby bedtime is on: Overnight look'"""
+    """'while Quiet hours is on: Overnight look'"""
     who = name or rule.when.entity
     when = f"while {who} is{' not' if rule.when.negate else ''} {rule.when.state}"
     if rule.action == NOTHING:

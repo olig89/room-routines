@@ -1169,7 +1169,7 @@ class RoomRoutinesPanel extends HTMLElement {
       <div class="card">
         ${(d.house.house_rules || []).length
           ? (d.house.house_rules || []).map((r) => `<div>${esc(this._ruleText(r))} <small class="muted">${(r.rooms || []).length ? `in ${r.rooms.map((id) => esc(d.rooms.find((x) => x.id === id)?.name || id)).join(", ")}` : "in every room"}</small></div>`).join("")
-          : `<div class="meta">None. A house rule changes how rooms behave while something holds: away from home, the baby asleep.</div>`}
+          : `<div class="meta">None. A house rule changes how rooms behave while something holds: away from home, quiet hours.</div>`}
         <div class="row"><button class="btn small" data-action="edit-house-rules">Change</button></div>
       </div>
       <h2>Lights out</h2>
@@ -1360,7 +1360,7 @@ class RoomRoutinesPanel extends HTMLElement {
 
   _condFields(root, base, c) {
     const now = c.entity ? this._hass.states[c.entity]?.state : null;
-    return `<input class="ent" list="rr-entities" placeholder="entity id, e.g. binary_sensor.baby_bedtime" value="${esc(c.entity || "")}" data-root="${root}" data-edit="${base}.entity" data-rerender aria-label="Entity">
+    return `<input class="ent" list="rr-entities" placeholder="entity id, e.g. binary_sensor.quiet_hours" value="${esc(c.entity || "")}" data-root="${root}" data-edit="${base}.entity" data-rerender aria-label="Entity">
       <select data-root="${root}" data-edit="${base}.negate" data-bool aria-label="Is or isn't">
         <option value="" ${c.negate ? "" : "selected"}>is</option><option value="1" ${c.negate ? "selected" : ""}>isn't</option>
       </select>
@@ -1399,7 +1399,7 @@ class RoomRoutinesPanel extends HTMLElement {
     return `<fieldset><legend>Listening to the house</legend>
       ${this._entityOptions()}
       ${this._condList("starters", "Start the routine when", "Any entity: a computer switching on, a door opening, a person coming home. Unlike a motion sensor it doesn't switch the room off when it changes back. Type the state it must reach (on, home, open, playing…).")}
-      ${this._condList("only_when", "Only start when", "Every way of starting (motion, a starter, a timer, lights taken over, the switch_on action) needs all of these. Use “isn't” for “not while”: Baby bedtime isn't on.")}
+      ${this._condList("only_when", "Only start when", "Every way of starting (motion, a starter, a timer, lights taken over, the switch_on action) needs all of these. Use “isn't” for “not while”: Quiet hours isn't on.")}
       <h3>While something holds</h3>
       ${r.rules.map((rule, i) => `<div class="cond rule">${this._ruleFields("room", `rules.${i}`, rule)} <button class="btn tiny danger" data-action="rule-remove" data-root="room" data-row="${i}">Remove</button></div>`).join("") || `<div class="meta">None.</div>`}
       <div class="row"><button class="btn small" data-action="rule-add" data-root="room">Add a rule</button></div>
@@ -1550,7 +1550,7 @@ class RoomRoutinesPanel extends HTMLElement {
       <div class="detailhead"><button class="btn small" data-action="house-rules-cancel"><ha-icon icon="mdi:arrow-left"></ha-icon> Back</button></div>
       <div class="card form">
         <h2 class="inline">House rules</h2>
-        <p class="explain">While something holds, change how rooms behave: away from home (do nothing), the baby asleep (a night look, or no brighter than a level). Tick the rooms a rule is for; none ticked means every room. A room's own rules come first.</p>
+        <p class="explain">While something holds, change how rooms behave: away from home (do nothing), quiet hours (a night look, or no brighter than a level). Tick the rooms a rule is for; none ticked means every room. A room's own rules come first.</p>
         ${this._houseRulesError ? `<div class="warntext">${esc(this._houseRulesError)}</div>` : ""}
         ${this._entityOptions()}
         ${rules.map((rule, i) => `<div class="cond rule">${this._ruleFields("house", `${i}`, rule)}

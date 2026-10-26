@@ -11,7 +11,7 @@ from .test_integration import CEILING, MODE, MONDAY_EVENING, STATUS, motion, set
 
 
 @pytest.fixture(autouse=True)
-async def evening(hass: HomeAssistant, tallinn, freezer):
+async def evening(hass: HomeAssistant, helsinki, freezer):
     freezer.move_to(MONDAY_EVENING)
 
 

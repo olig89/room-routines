@@ -9,20 +9,20 @@ from custom_components.room_routines.core.sun import clear_sky, position
 
 from .conftest import at
 
-TALLINN = (59.44, 24.75)
+HELSINKI = (60.17, 24.94)
 
 
-def test_sun_height_in_tallinn_at_the_end_of_september():
-    noon = position(*TALLINN, at(30, 13, 11))  # solar noon, about 13:11 local
-    assert noon.elevation == pytest.approx(27.7, abs=0.6)
-    assert position(*TALLINN, at(30, 10)).morning
-    assert not position(*TALLINN, at(30, 15)).morning
-    assert position(*TALLINN, at(30, 23)).elevation < -20
+def test_sun_height_in_helsinki_at_the_end_of_september():
+    noon = position(*HELSINKI, at(30, 13, 11))  # solar noon, about 13:11 local
+    assert noon.elevation == pytest.approx(27.4, abs=0.6)
+    assert position(*HELSINKI, at(30, 10)).morning
+    assert not position(*HELSINKI, at(30, 15)).morning
+    assert position(*HELSINKI, at(30, 23)).elevation < -20
 
 
 def test_needs_a_timezone():
     with pytest.raises(ValueError):
-        position(*TALLINN, datetime(2026, 9, 30, 12))
+        position(*HELSINKI, datetime(2026, 9, 30, 12))
 
 
 def test_clear_sky():

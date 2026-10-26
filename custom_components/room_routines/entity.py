@@ -17,7 +17,7 @@ def house_device(house: House) -> DeviceInfo:
 
 
 # Suggested object IDs. Home Assistant would otherwise build them from the floor,
-# the area, the device and the entity name ("2f_small_bathroom_small_bathroom_routine_mode").
+# the area, the device and the entity name ("ground_floor_bathroom_bathroom_routine_mode").
 ID_SUFFIX = {"status": "status", "ambient_lux": "light_level", "mode": "mode"}
 
 

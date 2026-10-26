@@ -23,7 +23,7 @@ MODE = "select.downstairs_toilet_routine_mode"
 STEALTH = "switch.room_routines_stealth_mode"
 PERIOD = "select.room_routines_period"
 
-MONDAY_EVENING = "2026-09-28 17:30:00+00:00"  # 20:30 in Tallinn
+MONDAY_EVENING = "2026-09-28 17:30:00+00:00"  # 20:30 in Helsinki
 
 
 def options(**room_over):
@@ -72,7 +72,7 @@ async def motion(hass: HomeAssistant, on: bool) -> None:
 
 
 @pytest.fixture(autouse=True)
-async def evening(hass: HomeAssistant, tallinn, freezer: FrozenDateTimeFactory):
+async def evening(hass: HomeAssistant, helsinki, freezer: FrozenDateTimeFactory):
     freezer.move_to(MONDAY_EVENING)
 
 
@@ -145,7 +145,7 @@ async def test_a_light_that_fades_by_itself_gets_plain_commands(hass, lights, fr
     }
     await setup(hass, looks=looks, self_fading=[CEILING])
     await motion(hass, True)
-    freezer.move_to("2026-09-28 20:00:00+00:00")  # 23:00 Tallinn: drift to Overnight
+    freezer.move_to("2026-09-28 20:00:00+00:00")  # 23:00 Helsinki: drift to Overnight
     async_fire_time_changed(hass)
     await hass.async_block_till_done()
     await wait(hass, freezer, 100)
@@ -234,7 +234,7 @@ async def test_period_change_drifts_a_lit_room(hass, lights, freezer):
     await setup(hass, looks=looks)
     await motion(hass, True)
     assert lights.of("turn_on")[-1]["brightness_pct"] == 80
-    freezer.move_to("2026-09-28 20:00:00+00:00")  # 23:00 Tallinn
+    freezer.move_to("2026-09-28 20:00:00+00:00")  # 23:00 Helsinki
     async_fire_time_changed(hass)
     await hass.async_block_till_done()
     assert hass.states.get(PERIOD).state == "Overnight"
@@ -406,14 +406,14 @@ async def test_removing_a_room_removes_its_entities(hass, lights):
 
 
 async def test_entity_ids_stay_short_in_an_area_on_a_floor(hass, lights):
-    floor = fr.async_get(hass).async_create("2F")
+    floor = fr.async_get(hass).async_create("Ground Floor")
     area = ar.async_get(hass).async_create("Downstairs Toilet", floor_id=floor.floor_id)
     await setup(hass, area_id=area.id)
-    # Without our own suggestion HA would name it sensor.2f_downstairs_toilet_downstairs_toilet_routine_status.
+    # Without our own suggestion HA would name it sensor.ground_floor_downstairs_toilet_downstairs_toilet_routine_status.
     assert hass.states.get(STATUS) is not None
     assert hass.states.get(MODE) is not None
     assert hass.states.get("sensor.downstairs_toilet_routine_light_level") is not None
-    assert not [s.entity_id for s in hass.states.async_all() if "2f_" in s.entity_id]
+    assert not [s.entity_id for s in hass.states.async_all() if "ground_floor_" in s.entity_id]
 
 
 @pytest.mark.parametrize("name", ["Alex's Office", "Alex’s Office"])
@@ -438,9 +438,9 @@ async def test_stray_option_keys_are_dropped_on_setup(hass, lights):
 
 async def test_period_select_knows_the_next_change(hass, lights, freezer):
     await setup(hass)
-    # Monday 20:30 Tallinn: Evening, and Overnight starts at 23:00.
+    # Monday 20:30 Helsinki: Evening, and Overnight starts at 23:00.
     assert hass.states.get(PERIOD).attributes["next_change"] == "2026-09-28T23:00:00+03:00"
-    freezer.move_to("2026-09-28 20:00:01+00:00")  # 23:00:01 Tallinn
+    freezer.move_to("2026-09-28 20:00:01+00:00")  # 23:00:01 Helsinki
     async_fire_time_changed(hass)
     await hass.async_block_till_done()
     state = hass.states.get(PERIOD)

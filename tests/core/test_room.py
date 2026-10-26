@@ -274,7 +274,7 @@ def test_power_circuit_goes_on_first_and_never_off():
 
 def test_two_trigger_sensors_share_one_room():
     # Stairs: sensors at the bottom and the top both wake the handrail.
-    top, bottom = "binary_sensor.landing_stairs_motion", "binary_sensor.hallway_stairs_motion"
+    top, bottom = "binary_sensor.stairs_top_motion", "binary_sensor.stairs_bottom_motion"
     cfg = RoomConfig("Stairs", ("light.stairs_handrail",), (bottom, top), looks={"Day": uniform(("light.stairs_handrail",))})
     r = room(cfg)
     r.sensor(top, True, at(28, 20))

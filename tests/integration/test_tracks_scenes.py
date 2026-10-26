@@ -28,11 +28,11 @@ TRACK = "select.room_routines_track"
 DARK_DAY = "binary_sensor.room_routines_dark_day"
 SCENE = "scene.wc_evening"
 REAL_FETCH = House._fetch_weather  # kept before the fixture below replaces it
-MONDAY_NOON = "2026-09-28 09:00:00+00:00"  # 12:00 in Tallinn, sun at about 28 degrees
+MONDAY_NOON = "2026-09-28 09:00:00+00:00"  # 12:00 in Helsinki, sun at about 27 degrees
 
 
 @pytest.fixture(autouse=True)
-async def evening(hass: HomeAssistant, tallinn, freezer):
+async def evening(hass: HomeAssistant, helsinki, freezer):
     freezer.move_to(MONDAY_EVENING)
 
 
@@ -135,11 +135,11 @@ async def test_the_weather_decides_by_day_and_a_lit_room_follows_after_the_hold(
 
 
 async def test_the_page_says_why_there_is_no_figure(hass, lights, freezer):
-    await start(hass)  # Monday evening in Tallinn: the sun is down
+    await start(hass)  # Monday evening in Helsinki: the sun is down
     a = hass.states.get(TRACK).attributes
     assert a["weather_state"] == "sun_down" and a["light_sensor_state"] == "sun_down"
 
-    freezer.move_to("2026-09-29 09:00:00+00:00")  # Tuesday 12:00 in Tallinn (forwards, so timers fire)
+    freezer.move_to("2026-09-29 09:00:00+00:00")  # Tuesday 12:00 in Helsinki (forwards, so timers fire)
     async_fire_time_changed(hass)
     await hass.async_block_till_done()
     a = hass.states.get(TRACK).attributes
@@ -184,7 +184,7 @@ async def test_choosing_a_track_by_hand_holds_until_the_next_period(hass, lights
     await hass.services.async_call("select", "select_option", {"entity_id": TRACK, "option": "normal"}, blocking=True)
     assert hass.states.get(TRACK).state == "normal"
     assert hass.states.get(TRACK).attributes["chosen_by_hand"] is True
-    freezer.move_to("2026-09-28 20:00:01+00:00")  # 23:00 Tallinn: Overnight starts
+    freezer.move_to("2026-09-28 20:00:01+00:00")  # 23:00 Helsinki: Overnight starts
     async_fire_time_changed(hass)
     await hass.async_block_till_done()
     assert hass.states.get(TRACK).state == "dim"

@@ -17,14 +17,14 @@ from custom_components.room_routines.core.serial import schedule_to
 PLAY = "light.office_play"
 STATUS = "sensor.office_routine_status"
 WORKDAY = "binary_sensor.workday_sensor"
-MONDAY_10 = "2026-09-28 07:00:00+00:00"  # 10:00 in Tallinn
+MONDAY_10 = "2026-09-28 07:00:00+00:00"  # 10:00 in Helsinki
 
 FOCUS = {"lights": {PLAY: {"on": True, "brightness_pct": 40, "color_temp_kelvin": 5000}}}
 DARK = {"lights": {PLAY: {"on": True, "brightness_pct": 5, "color_temp_kelvin": 2200}}}
 
 
 @pytest.fixture(autouse=True)
-async def morning(hass: HomeAssistant, tallinn, freezer):
+async def morning(hass: HomeAssistant, helsinki, freezer):
     freezer.move_to(MONDAY_10)
 
 
@@ -137,7 +137,7 @@ async def test_a_dark_only_timer_waits_for_the_dark(hass, lights, freezer):
 
 
 PC = "binary_sensor.office_pc"
-BEDTIME = "binary_sensor.baby_bedtime"
+BEDTIME = "binary_sensor.quiet_hours"
 
 
 async def test_a_starter_starts_the_routine_when_it_turns_on(hass, lights, freezer):

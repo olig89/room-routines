@@ -23,7 +23,7 @@ from custom_components.room_routines.core.tracks import (
 from .conftest import at
 
 WINDOW = "sensor.window_lux"
-STAIRS = "sensor.hallway_stairs_lux"
+STAIRS = "sensor.stairs_lux"
 SETTINGS = TrackSettings(on=True, sensor=WINDOW, fallback=STAIRS)
 HIGH = SunPosition(30.0, True)  # mid-morning, sun well up
 DOWN = SunPosition(-5.0, True)

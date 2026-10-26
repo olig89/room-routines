@@ -30,7 +30,7 @@ def at(hhmm: str):
 
 A = "light.landing"
 M = "binary_sensor.landing_motion"
-BEDTIME = "binary_sensor.baby_bedtime"
+BEDTIME = "binary_sensor.quiet_hours"
 BRIGHT = Look({A: LightTarget(True, 80, 3000)})
 NIGHT = Look({A: LightTarget(True, 3, 2200)})
 
@@ -95,20 +95,20 @@ def test_rules_and_conditions_round_trip():
     ]
     for rule in rules:
         assert rule_from(rule_to(rule)) == rule
-    cond = Condition("person.oli", "home", negate=True)
+    cond = Condition("person.alex", "home", negate=True)
     assert condition_from(condition_to(cond)) == cond
-    assert describe_rule(rules[0], "Baby bedtime") == "while Baby bedtime is on: Overnight look"
+    assert describe_rule(rules[0], "Quiet hours") == "while Quiet hours is on: Overnight look"
 
 
 def test_a_stored_room_carries_its_starters_conditions_and_rules():
     config = room_from({
         "name": "Office", "lights": [A], "triggers": [],
         "starters": [{"entity": "binary_sensor.pc"}],
-        "only_when": [{"entity": "person.oli", "state": "home"}],
+        "only_when": [{"entity": "person.alex", "state": "home"}],
         "rules": [{"when": {"entity": BEDTIME}, "action": "cap", "max_pct": 20}],
     })
     assert config.starters == (Condition("binary_sensor.pc"),)
-    assert config.only_when == (Condition("person.oli", "home"),)
+    assert config.only_when == (Condition("person.alex", "home"),)
     assert config.rules == (Rule(Condition(BEDTIME), CAP, max_pct=20),)
 
 
@@ -146,15 +146,15 @@ def test_do_nothing_leaves_a_lit_room_to_go_dark_as_usual():
 
 def test_only_when_blocks_every_start_and_says_why():
     room = make(landing(only_when=(Condition(BEDTIME, negate=True),)))
-    room.set_context(None, "", "Baby bedtime isn't on", at("20:00"))
+    room.set_context(None, "", "Quiet hours isn't on", at("20:00"))
     d = room.sensor(M, True, at("20:00"))
-    assert not d.actions and d.reason == f"motion at {M}, but only when Baby bedtime isn't on"
+    assert not d.actions and d.reason == f"motion at {M}, but only when Quiet hours isn't on"
 
 
 def test_another_look_while_a_rule_holds_and_back_after():
     room = make(landing(), period="Day")
     rule = Rule(Condition(BEDTIME), LOOK, period="Overnight")
-    room.set_context(rule, "while Baby bedtime is on: Overnight look", "", at("19:00"))
+    room.set_context(rule, "while Quiet hours is on: Overnight look", "", at("19:00"))
     d = room.sensor(M, True, at("19:30"))
     assert applied(d) == NIGHT
     assert "Overnight look" in d.reason

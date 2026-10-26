@@ -11,11 +11,11 @@ from custom_components.room_routines.core.serial import schedule_to
 
 LAMP, BATH = "light.office_lamp", "light.bath_ceiling"
 MOTION, CALL, MUTED, BEDTIME = "binary_sensor.bath_motion", "binary_sensor.call", "binary_sensor.muted", "binary_sensor.bedtime"
-THURSDAY_NOON = "2026-10-15 09:00:00+00:00"  # 12:00 in Tallinn
+THURSDAY_NOON = "2026-10-15 09:00:00+00:00"  # 12:00 in Helsinki
 
 
 @pytest.fixture(autouse=True)
-async def noon(hass: HomeAssistant, tallinn, freezer):
+async def noon(hass: HomeAssistant, helsinki, freezer):
     freezer.move_to(THURSDAY_NOON)
 
 
