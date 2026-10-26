@@ -3,10 +3,16 @@ name: Validate
 on:
   push:
     branches: [main]
+    paths-ignore: ['docs/**', '**/*.md']
   pull_request:
+    paths-ignore: ['docs/**', '**/*.md']
   schedule:
     - cron: "0 4 * * 1"
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   hassfest:
@@ -20,5 +26,3 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
-          # Brand icons are only required for the HACS default store.
-          ignore: brands
