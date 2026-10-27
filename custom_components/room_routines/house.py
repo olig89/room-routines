@@ -351,8 +351,15 @@ class RoomRunner:
             hand = {light: (dt_util.parse_datetime(u) if u else None) for light, u in hand.items()}
         else:
             hand = None
+        hand_set = {}
+        for light, kept in (memory.get("hand_set") or {}).items():
+            if not isinstance(kept, dict) or not isinstance(kept.get("target"), dict):
+                continue
+            since = dt_util.parse_datetime(kept.get("at") or "")
+            if since is not None:
+                hand_set[light] = (targets_from({light: kept.get("target")})[light], since)
         self._run(self.room.restore(
-            owned_at, bool(memory.get("paused")), now, memory.get("ambient"), memory.get("someone"), hand
+            owned_at, bool(memory.get("paused")), now, memory.get("ambient"), memory.get("someone"), hand, hand_set
         ))
         self._apply_resume()
 
@@ -491,7 +498,8 @@ class RoomRunner:
             )
         if not own:
             self._before_fade.pop(entity, None)  # a person's level wins from now on
-        self._run(self.room.lights(self._any_on(), own, now, entity))
+        # How a person set it: a room that blends held lights moves on from there.
+        self._run(self.room.lights(self._any_on(), own, now, entity, None if own else target_of(new)))
         if self._resume_out is not None and self._restore is None:
             self._apply_resume()
         if self._restore is not None and on:

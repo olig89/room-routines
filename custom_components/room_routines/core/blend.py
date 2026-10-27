@@ -19,6 +19,11 @@ Per light:
 
 A "do nothing" look, or a scene the integration can't read, can't be blended
 at all: such a room just changes when the period does.
+
+A light set by hand (``blend_held``) moves the same way, from how it was set
+to the next look. It needs a number to move from and to: a light off, at an
+unknown brightness, or set to a colour where the next look has a white (or the
+other way round) stays as set and changes when the next period starts.
 """
 
 from __future__ import annotations
@@ -66,6 +71,19 @@ def blend(a: Look, b: Look, f: float) -> Look:
     if not (blendable(a) and blendable(b)) or f == 0.0:
         return a
     return replace(a, lights={light: _target(t, b.lights.get(light), f) for light, t in a.lights.items()})
+
+
+def blend_held(a: LightTarget, b: LightTarget | None, f: float) -> LightTarget | None:
+    """A light set by hand to ``a``, ``f`` (0..1) of the way to ``b``; None if it
+    can't move there gradually."""
+    if b is None or not a.on or a.brightness_pct is None:
+        return None
+    if b.on:
+        if b.brightness_pct is None:
+            return None
+        if (a.rgb and b.color_temp_kelvin and not b.rgb) or (a.color_temp_kelvin and b.rgb and not b.color_temp_kelvin):
+            return None  # a colour and a white: no way between them
+    return _target(a, b, min(1.0, max(0.0, f)))
 
 
 def fraction(now: datetime, next_start: datetime, minutes: float) -> float | None:

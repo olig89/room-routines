@@ -7,7 +7,7 @@
 
 // Must match manifest.json (a test checks). Compared with the running integration so a
 // tab still holding old page code after an update says so.
-const PANEL_VERSION = "0.15.2";
+const PANEL_VERSION = "0.16.0";
 
 const STATE_LABEL = { idle: "Idle", owned: "Lights on by motion", manual: "Switched on by hand" };
 const MODE_LABEL = { off: "Off", log_only: "Log only", live: "Live" };
@@ -30,6 +30,7 @@ const ON_BY_HAND = {
 const HAND_HOLD = {
   until_off: "Until the lights are switched off",
   moves_on: "Until the routine moves on",
+  blends: "Until the next period, blending into it",
   minutes: "For a number of minutes",
 };
 const TIMER_DAYS = { every_day: "Every day", workdays: "Workdays", days: "Chosen days" };
@@ -1260,6 +1261,7 @@ class RoomRoutinesPanel extends HTMLElement {
 
   _handText(s) {
     if (s.hand_hold === "moves_on") return "until the routine moves on";
+    if (s.hand_hold === "blends") return "until the next period, blending into it";
     if (s.hand_hold === "minutes") return `for ${s.hand_minutes || 20} min`;
     return "until the lights are switched off";
   }
@@ -1305,7 +1307,7 @@ class RoomRoutinesPanel extends HTMLElement {
       </select><span class="help">A wall switch or another app. Starting the routine gives the lights the period's look and then follows the day.</span></label>
       <label>A light changed by hand is left as set <select data-room-field="hand_hold">
         ${Object.entries(HAND_HOLD).map(([k, v]) => `<option value="${k}" ${k === r.hand_hold ? "selected" : ""}>${v}</option>`).join("")}
-      </select><span class="help">Only the lights you change are left alone; the room's other lights carry on with the routine. "Moves on" means a new period starts, the day turns into a Dark Day or back, a rule starts or ends, or someone arrives or leaves. Then the light goes back to what the room is doing.</span></label>
+      </select><span class="help">Only the lights you change are left alone; the room's other lights carry on with the routine. "Moves on" means a new period starts, the day turns into a Dark Day or back, a rule starts or ends, or someone arrives or leaves. Then the light goes back to what the room is doing. "Blending into it" works with the period's blend minutes below: over them the light moves from how you set it to the next period's look (one in a colour where the next look has a white, or the other way round, waits for the period start). It's let go when the routine moves on, as above.</span></label>
       ${r.hand_hold === "minutes" ? `<label>For <span class="inputunit"><input type="number" min="1" max="1440" step="5" value="${esc(r.hand_minutes)}" data-room-field="hand_minutes" aria-label="Minutes"> min</span></label>` : ""}
       <table class="plain periods">
         <tr><th>Period</th><th>This room's start</th><th>Blend into the next period over</th>${r.triggers.length || r.holds.length ? "<th>Go dark once empty for</th>" : ""}</tr>

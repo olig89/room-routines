@@ -427,7 +427,7 @@ ROOM_FIELDS = vol.Schema(
         vol.Required("drift_s"): vol.All(vol.Coerce(int), vol.Range(min=0, max=600)),
         vol.Optional("self_fading", default=list): [str],
         vol.Optional("on_by_hand"): vol.In(["leave", "routine"]),
-        vol.Optional("hand_hold"): vol.In(["until_off", "moves_on", "minutes"]),
+        vol.Optional("hand_hold"): vol.In(["until_off", "moves_on", "minutes", "blends"]),
         vol.Optional("hand_minutes"): vol.All(vol.Coerce(int), vol.Range(min=1, max=1440)),
         vol.Optional("ends"): [str],
         vol.Optional("blends"): {str: vol.All(vol.Coerce(int), vol.Range(min=0, max=1440))},

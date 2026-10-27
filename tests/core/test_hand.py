@@ -9,6 +9,7 @@ from custom_components.room_routines.core.layers import Layer
 from custom_components.room_routines.core.looks import LightTarget, Look
 from custom_components.room_routines.core.periods import default_schedule
 from custom_components.room_routines.core.room import (
+    BLENDS,
     FOR_MINUTES,
     MOVES_ON,
     ApplyLook,
@@ -190,6 +191,126 @@ def test_a_signal_released_from_a_hand_held_light_goes_back_to_how_it_was():
     d = room.set_signals({"binary_sensor.call": "off"}, {}, at(5, 11, 2))
     [back] = applied(d)
     assert back.look.lights[A] == set_by_hand  # not the routine's look: it's held by hand
+
+
+# ---- held lights that blend into the next period ------------------------------
+# Day borrows Morning's FOCUS; blending over the last hour, 16:00-17:00.
+
+DINNER = LightTarget(True, 80, 3000)
+
+
+def kitchen(**over) -> RoomConfig:
+    return office(**{"hand_hold": BLENDS, "blends": {"Day": 60}, **over})
+
+
+def held_look(decision):
+    """The command sent to the lights set by hand (the last one in a blend step)."""
+    return applied(decision)[-1].look.lights
+
+
+def test_a_held_light_waits_then_blends_from_how_it_was_set_into_the_next_look():
+    room = started(kitchen())
+    d = room.lights(True, own=False, now=at(5, 11), light=A, state=DINNER)
+    assert "until the next period, blending into it" in d.reason
+    assert room.blend_tick(at(5, 15, 30)).actions == ()  # the window isn't open yet
+    d = room.blend_tick(at(5, 16, 30))
+    routine, held = applied(d)
+    assert set(routine.look.lights) == {B}  # the routine blends its own light
+    assert held.look.lights[A].brightness_pct == pytest.approx(42.5)  # half way from 80 to 5
+    assert held.look.lights[A].color_temp_kelvin == 2538  # half way in mireds from 3000 to 2200
+    assert held.transition == timedelta(minutes=2)
+    assert "1 light set by hand blending into Evening (50 %)" in d.reason
+    assert room.blend_tick(at(5, 16, 30)).actions == ()  # nothing new to send
+    d = room.period_changed("Evening", at(5, 17))
+    assert room.hand == {} and applied(d)[0].look == DARK  # let go at the period start
+
+
+def test_a_hand_set_scene_with_a_light_on_dims_and_goes_off_when_the_next_look_has_it_off():
+    evening = Look({A: LightTarget(False), B: LightTarget(True, 2, 2200)})
+    room = started(kitchen(looks={"Morning": FOCUS, "Evening": evening}))
+    room.lights(True, own=False, now=at(5, 11), light=A, state=DINNER)
+    room.lights(True, own=False, now=at(5, 11), light=B, state=LightTarget(True, 60, 2700))
+    assert room.paused  # the whole scene is held, as when it's picked by hand
+    d = room.blend_tick(at(5, 16, 30))
+    [held] = applied(d)  # paused: only the held lights move
+    assert held.look.lights[A] == LightTarget(True, 40.5, 3000)  # towards the minimum, colour kept
+    assert held.look.lights[B] == LightTarget(True, 31.0, 2424)
+    d = room.blend_tick(at(5, 16, 59))
+    assert held_look(d)[A].brightness_pct == pytest.approx(2.3)
+    d = room.period_changed("Evening", at(5, 17))
+    [look] = applied(d)
+    assert look.look.lights[A] == LightTarget(False) and look.transition == timedelta(seconds=90)
+
+
+def test_a_light_set_during_the_window_starts_from_there_without_jumping():
+    room = started(kitchen())
+    room.lights(True, own=False, now=at(5, 16, 30), light=A, state=DINNER)
+    assert held_look(room.blend_tick(at(5, 16, 30)))[A] == DINNER
+    d = room.blend_tick(at(5, 16, 45))  # half of what's left of the window
+    assert held_look(d)[A].brightness_pct == pytest.approx(42.5)
+
+
+def test_the_latest_report_of_a_hand_change_is_the_one_blended_from():
+    room = started(kitchen())
+    room.lights(True, own=False, now=at(5, 11), light=A, state=LightTarget(True, 30, 3000))
+    room.lights(True, own=False, now=at(5, 11, 0, 2), light=A, state=DINNER)  # the scene's transition settles
+    assert held_look(room.blend_tick(at(5, 16, 30)))[A].brightness_pct == pytest.approx(42.5)
+
+
+@pytest.mark.parametrize("state", [
+    LightTarget(True, 80, rgb=(255, 120, 0)),  # a colour, and the next look has a white
+    LightTarget(True),  # brightness unknown
+    LightTarget(False),  # off, the next look has it on
+    None,  # not reported
+])
+def test_a_held_light_that_cant_blend_waits_for_the_period_start(state):
+    room = started(kitchen())
+    room.lights(True, own=False, now=at(5, 11), light=A, state=state)
+    d = room.blend_tick(at(5, 16, 30))
+    assert all(A not in a.look.lights for a in applied(d))
+    d = room.period_changed("Evening", at(5, 17))
+    assert room.hand == {} and applied(d)[0].look == DARK
+
+
+def test_without_a_blend_for_the_period_it_holds_until_the_routine_moves_on():
+    room = started(kitchen(blends={}))
+    room.lights(True, own=False, now=at(5, 11), light=A, state=DINNER)
+    assert room.blend_tick(at(5, 16, 30)).actions == ()
+    d = room.period_changed("Evening", at(5, 17))
+    assert room.hand == {} and applied(d)[0].look == DARK
+
+
+def test_a_rule_starting_lets_go_mid_blend():
+    from custom_components.room_routines.core.rules import CAP, Condition, Rule
+
+    room = started(kitchen())
+    room.lights(True, own=False, now=at(5, 11), light=A, state=DINNER)
+    room.blend_tick(at(5, 16, 30))
+    room.set_context(Rule(Condition("binary_sensor.tv"), CAP, max_pct=30), "while the TV is on", "", at(5, 16, 40))
+    assert room.hand == {}
+    assert len(applied(room.blend_tick(at(5, 16, 44)))) == 1  # just the routine now
+
+
+def test_a_signal_keeps_the_blend_off_its_light():
+    from custom_components.room_routines.core.rules import Condition
+    from custom_components.room_routines.core.signals import Signal
+
+    call = Signal("Call", Condition("binary_sensor.call"), {A: LightTarget(True, 100, rgb=(102, 0, 255))})
+    room = started(kitchen(signals=(call,)))
+    room.lights(True, own=False, now=at(5, 11), light=A, state=DINNER)
+    room.set_signals({"binary_sensor.call": "on"}, {A: DINNER}, at(5, 16, 20))
+    d = room.blend_tick(at(5, 16, 30))
+    assert all(A not in a.look.lights for a in applied(d))
+
+
+def test_how_a_held_light_was_set_survives_a_restart():
+    room = started(kitchen())
+    room.lights(True, own=False, now=at(5, 11), light=A, state=DINNER)
+    memory = room.memory()
+    assert memory["hand_set"][A]["at"] == at(5, 11).isoformat()
+    after = Room(kitchen(), default_schedule(), "Day", True, at(5, 16))
+    after.restore(at(5, 10), False, at(5, 16), True, False, {A: None}, {A: (DINNER, at(5, 11))})
+    assert held_look(after.blend_tick(at(5, 16, 30)))[A].brightness_pct == pytest.approx(42.5)
 
 
 # ---- a sensor that ends a visit -----------------------------------------------
