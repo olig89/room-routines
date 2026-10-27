@@ -77,7 +77,12 @@ set; the room's other lights carry on. How long it's left alone is the room's
 routine moves on (a new period, a Dark Day change, a rule starting or ending,
 someone arriving or the room emptying), or for ``hand_minutes`` (rooms set up
 through the integration default to 20 minutes). Then it goes
-back to what the room is doing. ``layer()`` says which layer is on top now.
+back to what the room is doing. ``BLENDS`` is "until the routine moves on",
+with the room's blend into the next period: over the blend window a held light
+moves from how it was set (its reported state, ``hand_set``) to the next look,
+and is let go when the period starts. One that can't move gradually (see
+``blend.blend_held``) waits for the period start, as with ``MOVES_ON``.
+``layer()`` says which layer is on top now.
 
 A sensor listed in ``ends`` ends a visit the moment it goes off (a pantry door
 closing): the lights go off at once, whatever the hold sensors say, without the
@@ -105,7 +110,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta
 from enum import Enum
 
-from .blend import blend, blendable, fraction
+from .blend import blend, blend_held, blendable, fraction
 from .layers import Layer
 from .looks import LightTarget, Look, LookSource, resolve, scaled
 from .lux import AmbientTracker, dark_enough
@@ -121,7 +126,8 @@ ROUTINE = "routine"
 UNTIL_OFF = "until_off"
 MOVES_ON = "moves_on"
 FOR_MINUTES = "minutes"
-HAND_HOLDS = (UNTIL_OFF, MOVES_ON, FOR_MINUTES)
+BLENDS = "blends"  # until the routine moves on, blending into the next period with the room
+HAND_HOLDS = (UNTIL_OFF, MOVES_ON, FOR_MINUTES, BLENDS)
 ADOPT_WAIT = timedelta(seconds=3)  # let a hand switch-on settle before taking over
 BLEND_STEP = timedelta(minutes=2)  # how often a blending room is moved on
 # After a restart, how long a sensor that hasn't reported counts as "someone's there".
@@ -161,7 +167,8 @@ class RoomConfig:
     # bring them to the routine's look and follow it (ROUTINE).
     on_by_hand: str = "leave"
     # How long a light changed by hand is left as it was set: until the lights
-    # go off, until the routine moves on, or for ``hand_minutes``.
+    # go off, until the routine moves on (BLENDS: blending into the next period
+    # on the way), or for ``hand_minutes``.
     hand_hold: str = UNTIL_OFF
     hand_minutes: float = 30.0
     # Sensors that end a visit the moment they go off (a door closing).
@@ -350,6 +357,9 @@ class Room:
         # until each one's time (None: until the lights go off, or until the
         # routine moves on, by ``hand_hold``). The room's other lights carry on.
         self.hand: dict[str, datetime | None] = {}
+        # How each held light was set (its reported state) and when: a BLENDS room
+        # moves it from there into the next period's look.
+        self.hand_set: dict[str, tuple[LightTarget, datetime]] = {}
         # Lights switched on by hand in a ROUTINE room: taken over at this time.
         self.adopt_at: datetime | None = None
         # A Lights out waiting for the room to empty, until this time (the next
@@ -359,6 +369,7 @@ class Room:
         self.lights_out_at: datetime | None = None
         self.lights_out_name = ""
         self._last_blend: Look | None = None
+        self._last_held: Look | None = None
         # From the integration (``set_context``): the rule in force, and why
         # starting isn't allowed right now (an "only when" not met).
         self.rule: Rule | None = None
@@ -393,7 +404,7 @@ class Room:
 
     def _moves_on(self) -> list[str]:
         """The routine moves on: lights held "until it moves on" go back to it."""
-        if self.config.hand_hold != MOVES_ON or not self.hand:
+        if self.config.hand_hold not in (MOVES_ON, BLENDS) or not self.hand:
             return []
         released = list(self.hand)
         self.hand = {}
@@ -535,6 +546,18 @@ class Room:
         Blending belongs to the routine when it's running, else to the layer on top."""
         if layer is None:
             layer = Layer.AMBIENT if self.ambient_on else self._top()
+        window = self._window(now)
+        if window is None:
+            return None
+        f, nxt, _ = window
+        here = self._as_lights(self.source(layer))
+        there = self._as_lights(self._resolve(layer, nxt))
+        if here is None or there is None:
+            return None
+        return f, nxt, blend(here, there, f)
+
+    def _window(self, now: datetime) -> tuple[float, str, datetime] | None:
+        """(fraction, next period, its start) while the room's blend window is open."""
         minutes = self.config.blends.get(self.period, 0)
         if not minutes or (self.rule is not None and self.rule.action == LOOK):
             return None
@@ -544,11 +567,34 @@ class Room:
         f = fraction(now, at.next_start, minutes)
         if f is None:
             return None
-        here = self._as_lights(self.source(layer))
-        there = self._as_lights(self._resolve(layer, at.next_name))
-        if here is None or there is None:
+        return f, at.next_name, at.next_start
+
+    def _held_blend(self, now: datetime) -> tuple[Look, float, str] | None:
+        """(look, fraction, next period) for lights held by hand in a BLENDS room while
+        the blend window is open: each moves from how it was set to the next look.
+        One set during the window starts from there, so it doesn't jump."""
+        if self.config.hand_hold != BLENDS or not self.hand:
             return None
-        return f, at.next_name, blend(here, there, f)
+        window = self._window(now)
+        if window is None:
+            return None
+        f, nxt, next_start = window
+        layer = Layer.AMBIENT if self.ambient_on else self._top()
+        there = self._as_lights(self._resolve(layer, nxt))
+        if there is None:
+            return None
+        there, _ = self._cap(there, 1.0)
+        minutes = self.config.blends[self.period]
+        lights: dict[str, LightTarget] = {}
+        for light in self.hand:
+            if light not in self.hand_set:
+                continue  # how it was set isn't known: it waits for the period start
+            target, since = self.hand_set[light]
+            f0 = fraction(since, next_start, minutes) or 0.0
+            moved = blend_held(target, there.lights.get(light), (f - f0) / (1 - f0))
+            if moved is not None:
+                lights[light] = moved
+        return (Look(lights), f, nxt) if lights else None
 
     def _layer_target(self, layer: Layer, now: datetime, blending: bool = True) -> tuple[Look, float, str]:
         """One layer's look as it should be sent now, blending included."""
@@ -646,9 +692,10 @@ class Room:
         self.last = Decision(tuple(shielded), reason)
         return self.last
 
-    def _shield(self, action: Action) -> list[Action]:
-        """Keep the room's own commands off the lights a signal holds."""
-        blocked = set(self.held) | set(self.hand)
+    def _shield(self, action: Action, hand: bool = True) -> list[Action]:
+        """Keep the room's own commands off the lights a signal holds (and, unless
+        ``hand`` is False, those held by hand)."""
+        blocked = set(self.held) | (set(self.hand) if hand else set())
         if not blocked or not isinstance(action, (ApplyLook, TurnOff)):
             return [action]
         if isinstance(action, TurnOff):
@@ -662,7 +709,7 @@ class Room:
             if lights is None:
                 # A scene that can't be read (another app's): turn it on, then put
                 # the signals back on the lights it may have changed.
-                if self.hand:
+                if hand and self.hand:
                     return []  # it would change lights left as set by hand: leave the room as it is
                 return [action, *self._signal_actions(list(self.held), flash=False)] if self.held else [action]
             look = scaled(Look(dict(lights)), action.factor)
@@ -796,8 +843,10 @@ class Room:
         self.owned_at = now
         self.deadline = None
         self.hand = {}
+        self.hand_set = {}
         self.adopt_at = None
         self._last_blend = None
+        self._last_held = None
         self._end_dark()  # started on purpose: no longer kept dark
         self._clear_lights_out()  # started on purpose (a timer, a button): Lights out lets go
         self.ambient.lights_changed(True, now)
@@ -812,8 +861,10 @@ class Room:
         self.deadline = None
         self.owned_at = None
         self.hand = {}
+        self.hand_set = {}
         self.adopt_at = None
         self._last_blend = None
+        self._last_held = None
         self._clear_lights_out()  # off: motion works as usual again
 
     def has_any_look(self) -> bool:
@@ -854,6 +905,12 @@ class Room:
                 "ambient": self.ambient_on,
                 "someone": self.someone_on,
             }
+            hand_set = {
+                light: {"at": since.isoformat(), "target": targets_to({light: t})[light]}
+                for light, (t, since) in self.hand_set.items() if light in self.hand
+            }
+            if hand_set:
+                out["hand_set"] = hand_set  # how held lights were set, for a room that blends them
         if self.before:
             # How signal-held lights were before, so a restart can still give them back.
             out["signal_before"] = targets_to(self.before)
@@ -867,6 +924,7 @@ class Room:
         ambient: bool | None = None,
         someone: bool | None = None,
         hand: Mapping[str, datetime | None] | None = None,
+        hand_set: Mapping[str, tuple[LightTarget, datetime]] | None = None,
     ) -> Decision:
         """After a restart: the routine was running these lights, so carry on.
         Only for a room whose lights were found on (``MANUAL``). Memory from before
@@ -890,6 +948,7 @@ class Room:
         if self.config.hand_hold == FOR_MINUTES:
             # A hold by minutes with no time (old memory, an unreadable one): from now.
             self.hand = {l: u if u is not None else self._hand_until(now) for l, u in self.hand.items()}
+        self.hand_set = {l: v for l, v in (hand_set or {}).items() if l in self.hand}
         self._note_someone_lit()
         decision = self._restyle("picked up again after a restart", blinds=False, now=now, release=False)
         if self.unheard & (set(self.config.triggers) | set(self.config.holds)):
@@ -1107,9 +1166,11 @@ class Room:
         since = self.owned_at or now
         return HandChange(kind, self.period, self.track, now - since)
 
-    def lights(self, any_on: bool, own: bool, now: datetime, light: str | None = None) -> Decision:
-        """A light in the room changed (``light``, if known). ``any_on`` is the room
-        after the change."""
+    def lights(
+        self, any_on: bool, own: bool, now: datetime, light: str | None = None, state: LightTarget | None = None
+    ) -> Decision:
+        """A light in the room changed (``light``, if known, now reporting ``state``).
+        ``any_on`` is the room after the change."""
         self.ambient.lights_changed(any_on, now)
         if own:
             if not any_on and self.state is State.MANUAL:
@@ -1133,11 +1194,16 @@ class Room:
             until = self._hand_until(now)
             for l in touched:
                 self.hand[l] = until
+                self.hand_set.pop(l, None)
+            if state is not None and touched == [light] and self.config.hand_hold == BLENDS:
+                self.hand_set[light] = (state, now)  # the latest report wins (a scene's transition)
             what = f"{touched[0]} changed by hand" if len(touched) == 1 else "changed by hand"
             if self.config.hand_hold == FOR_MINUTES:
                 how = f"left as set for {self.config.hand_minutes:g} min"
             elif self.config.hand_hold == MOVES_ON:
                 how = "left as set until the routine moves on"
+            elif self.config.hand_hold == BLENDS:
+                how = "left as set until the next period, blending into it"
             else:
                 how = "left as set until the lights are switched off"
             tail = ", still switches off when empty" if self.someone_on and not self.ambient_on else ""
@@ -1187,6 +1253,7 @@ class Room:
     def period_changed(self, period: str, now: datetime) -> Decision:
         self.period = period
         self._last_blend = None
+        self._last_held = None
         decision = self._restyle(f"period is now {period}", blinds=True, now=now)
         if self.lights_out_until is not None and now >= self.lights_out_until:
             over = self._lights_out_check(now)
@@ -1256,17 +1323,33 @@ class Room:
         return self._unchanged()
 
     def blend_tick(self, now: datetime) -> Decision:
-        """Move a lit, blending room one step on (called every ``BLEND_STEP``)."""
-        if self.state is not State.OWNED or self.paused:
+        """Move a lit, blending room one step on (called every ``BLEND_STEP``), with
+        the lights held by hand in a BLENDS room."""
+        if self.state is not State.OWNED:
             return self._unchanged()
-        if self.blending(now) is None:
+        held = self._held_blend(now)
+        if held is not None and held[0] == self._last_held:
+            held = None
+        actions: list[Action] = []
+        reasons: list[str] = []
+        if not self.paused and self.blending(now) is not None:
+            self._note_someone_lit()
+            look, factor, name = self._target(now)  # Someone's there's lights stay over the blend
+            if look != self._last_blend:
+                self._last_blend = look
+                actions += self._shield(ApplyLook(look, self._power_for(look), BLEND_STEP, factor))
+                reasons.append(name)
+        if held is not None:
+            look, f, nxt = held
+            self._last_held = look
+            # Sent to the lights held by hand on purpose: only a signal keeps it off.
+            actions += self._shield(ApplyLook(look, self._power_for(look), BLEND_STEP), hand=False)
+            n = len(look.lights)
+            reasons.append(f"{n} light{'s' if n != 1 else ''} set by hand blending into {nxt} ({round(f * 100)} %)")
+        if not reasons:
             return self._unchanged()
-        self._note_someone_lit()
-        look, factor, name = self._target(now)  # Someone's there's lights stay over the blend
-        if look == self._last_blend:
-            return self._unchanged()
-        self._last_blend = look
-        return self._decide(name, ApplyLook(look, self._power_for(look), BLEND_STEP, factor))
+        self.last = Decision(tuple(actions), "; ".join(reasons))
+        return self.last
 
     def set_stealth(self, on: bool, now: datetime) -> Decision:
         self.stealth = on

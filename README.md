@@ -73,7 +73,13 @@ room can run in log-only mode first.
   minutes (the default: 20), until the lights are switched off, or until the
   routine moves on (a new period, a Dark Day change, a rule starting or ending,
   someone arriving or the room emptying), and then goes back to what the room
-  is doing. The room's own changes aren't mistaken for a person's: a light
+  is doing. A room that blends can instead leave it as set until the next
+  period, blending into it: over the room's blend minutes the light moves from
+  how it was set (a scene picked for dinner) to the next period's look, and the
+  next period takes it back when it starts. A light set to a colour where the
+  next look has a white (or the other way round), or one that was off, waits
+  for the next period instead. It's also let go when the routine moves on in
+  another way, as above. The room's own changes aren't mistaken for a person's: a light
   reporting its progress during a transition, reporting late, or only settling
   its colour at the same level counts as the room's doing.
   A sensor can be marked **off at once**: when it goes off (a pantry door

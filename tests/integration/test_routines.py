@@ -400,6 +400,26 @@ async def test_a_stepped_drift_leaves_a_light_changed_by_hand_and_carries_on_wit
     assert len([c for c in lights.of("turn_on") if c["entity_id"] == PLAY]) > play_steps  # still drifting
 
 
+async def test_a_light_set_by_hand_blends_into_the_next_period_from_how_it_was_set(hass, lights, freezer):
+    await setup(hass, hand_hold="blends")
+    await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
+    await hass.async_block_till_done()
+    await at(hass, freezer, "2026-09-28 07:00:20+00:00")
+    hass.states.async_set(PLAY, "on", {  # someone picks a dinner scene
+        "brightness": 204, "color_mode": "color_temp", "color_temp_kelvin": 3000,
+        "supported_features": LightEntityFeature.TRANSITION,
+    })
+    await hass.async_block_till_done()
+    assert "blending into it" in hass.states.get(STATUS).attributes["reason"]
+    # 15:30 is halfway through the 13:00-18:00 blend: halfway from 80 % to 5 %.
+    await at(hass, freezer, "2026-09-28 12:30:00+00:00")
+    last = lights.of("turn_on")[-1]
+    assert last["brightness_pct"] == pytest.approx(42.5) and last["transition"] == 120
+    assert 2500 < last["color_temp_kelvin"] < 2600
+    await at(hass, freezer, "2026-09-28 15:00:01+00:00")
+    assert room(hass).hand == {}  # the office's Evening takes it back
+
+
 async def test_a_hand_change_is_left_for_20_minutes_by_default(hass, lights, freezer):
     await setup(hass)
     await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)

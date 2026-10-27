@@ -28,7 +28,7 @@ from .core.daylight import MIN_ELEVATION
 from .core.habits import ADJUSTED
 from .core.lights_out import AT_PERIOD, AT_TIME, MODE_LIVE as LIGHTS_OUT_LIVE, MODE_OFF as LIGHTS_OUT_OFF, LightsOut
 from .core.looks import Look
-from .core.room import FOR_MINUTES, MOVES_ON
+from .core.room import BLENDS, FOR_MINUTES, MOVES_ON
 from .core.timeline import Band, DayFacts, Lane, day_spans, room_lanes
 from .core.timers import Today
 from .house import House, RoomRunner, scene_lights
@@ -209,11 +209,12 @@ def _room_history(hass: HomeAssistant, house: House, runner: RoomRunner, rows: d
         if change.room_id != runner.room_id or change.kind != ADJUSTED or change.at < start:
             continue
         a = _minute(change.at)
-        # A hand change holds until the lights go off, and for its minutes or until the routine moves on.
+        # A hand change holds until the lights go off, and for its minutes or until the routine moves on
+        # (a held light that blends is still the hand's until the next period starts).
         b = next((_minute(at) for at, value in status if at > change.at and value == "idle"), _minute(now))
         if runner.config.hand_hold == FOR_MINUTES:
             b = min(b, a + int(runner.config.hand_minutes))
-        elif runner.config.hand_hold == MOVES_ON:
+        elif runner.config.hand_hold in (MOVES_ON, BLENDS):
             b = min(b, next((s for s, _, _ in day_spans(runner.schedule, start.date()) if s > a), b))
         hand.append([a, max(a + 1, min(b, _minute(now)))])
 
