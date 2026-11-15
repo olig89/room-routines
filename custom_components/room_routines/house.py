@@ -61,7 +61,7 @@ from homeassistant.helpers.event import (
     async_track_time_interval,
 )
 from homeassistant.helpers.storage import Store
-from homeassistant.util import dt as dt_util
+from homeassistant.util import color as color_util, dt as dt_util
 
 from .const import ANY_SIGNAL, DOMAIN, MODE_LIVE, MODE_LOG_ONLY, MODE_OFF, house_signal, room_signal
 from .core.fade import plan_fade
@@ -1198,13 +1198,28 @@ class RoomRunner:
 COLOUR_MODES = {"rgb", "rgbw", "rgbww", "hs", "xy"}
 
 
+def colour_of(attributes: Mapping[str, Any]) -> tuple[int, int, int] | None:
+    """A light's colour as RGB. A live light always reports rgb_color, but a scene
+    stores what was saved: often only hs_color (the scene editor) or xy_color."""
+    rgb = attributes.get("rgb_color")
+    if rgb:
+        return tuple(int(c) for c in rgb)
+    hs = attributes.get("hs_color")
+    if hs:
+        return color_util.color_hs_to_RGB(float(hs[0]), float(hs[1]))
+    xy = attributes.get("xy_color")
+    if xy:
+        return color_util.color_xy_to_RGB(float(xy[0]), float(xy[1]))
+    return None
+
+
 def target_of(state) -> LightTarget:
     """A light's state (live, or as stored in a scene) as a look's target."""
     if state.state != STATE_ON:
         return OFF
     mode = state.attributes.get("color_mode")
     kelvin = state.attributes.get("color_temp_kelvin")
-    rgb = state.attributes.get("rgb_color")
+    rgb = colour_of(state.attributes)
     if mode is not None:
         kelvin = kelvin if mode == "color_temp" else None
         rgb = rgb if mode in COLOUR_MODES else None
@@ -1215,7 +1230,7 @@ def target_of(state) -> LightTarget:
         True,
         pct if pct is None or pct > 0 else 1.0,
         int(kelvin) if kelvin else None,
-        tuple(int(c) for c in rgb) if rgb else None,
+        rgb,
     )
 
 
