@@ -76,11 +76,12 @@ async def start(
     return entry
 
 
-async def scenes(hass: HomeAssistant, brightness: int = 77) -> None:
+async def scenes(hass: HomeAssistant, brightness: int = 77, **colour) -> None:
     assert await async_setup_component(
         hass,
         "scene",
-        {"scene": [{"id": "wc_evening_id", "name": "WC Evening", "entities": {CEILING: {"state": "on", "brightness": brightness}}}]},
+        {"scene": [{"id": "wc_evening_id", "name": "WC Evening",
+                    "entities": {CEILING: {"state": "on", "brightness": brightness, **colour}}}]},
     )
     await hass.async_block_till_done()
 
@@ -327,6 +328,28 @@ async def test_scene_settings_can_be_read(hass, lights):
     await start(hass, tracks=False)
     assert scene_lights(hass, SCENE, [CEILING]) == {CEILING: LightTarget(True, 50.2)}
     assert scene_lights(hass, "scene.nope", [CEILING]) is None
+
+
+@pytest.mark.parametrize(
+    ("colour", "rgb"),
+    [
+        ({"hs_color": [120, 100]}, (0, 255, 0)),  # as the scene editor saves a colour
+        ({"color_mode": "hs", "hs_color": [0, 100]}, (255, 0, 0)),
+        ({"xy_color": [0.701, 0.299]}, (255, 0, 0)),
+        ({"rgb_color": [1, 2, 3], "hs_color": [120, 100]}, (1, 2, 3)),
+    ],
+)
+async def test_a_scene_colour_saved_as_hs_or_xy_is_read_as_a_colour(hass, lights, colour, rgb):
+    await scenes(hass, brightness=128, **colour)
+    await start(hass, tracks=False)
+    target = scene_lights(hass, SCENE, [CEILING])[CEILING]
+    assert target.rgb == rgb and target.color_temp_kelvin is None
+
+
+async def test_a_scene_white_is_still_read_as_a_white(hass, lights):
+    await scenes(hass, brightness=128, color_mode="color_temp", color_temp_kelvin=2700)
+    await start(hass, tracks=False)
+    assert scene_lights(hass, SCENE, [CEILING]) == {CEILING: LightTarget(True, 50.2, 2700)}
 
 
 async def test_set_look_action_can_save_a_dim_scene_look(hass, lights):

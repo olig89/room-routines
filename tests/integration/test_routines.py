@@ -9,6 +9,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry, async_
 
 from homeassistant.components.light import LightEntityFeature
 from homeassistant.core import HomeAssistant
+from homeassistant.setup import async_setup_component
 
 from custom_components.room_routines.const import DOMAIN
 from custom_components.room_routines.core.periods import default_schedule
@@ -347,6 +348,34 @@ async def test_a_call_signal_takes_the_iris_and_gives_it_back(hass, lights, free
     await hass.async_block_till_done()
     back = lights.of("turn_on")[-1]
     assert back["entity_id"] == IRIS and back["brightness_pct"] == 40 and "rgb_color" not in back
+
+
+async def test_a_signal_gives_a_scene_look_its_hs_colour_back(hass, lights):
+    """The scene editor saves a colour as hs_color only: the light goes back to
+    that colour, not just its brightness, when the signal ends."""
+    assert await async_setup_component(hass, "scene", {"scene": [{
+        "id": "office_warm", "name": "Office Warm",
+        "entities": {IRIS: {"state": "on", "brightness": 102, "hs_color": [30, 100]}},
+    }]})
+    hass.states.async_set(IRIS, "off", {"supported_features": LightEntityFeature.TRANSITION})
+    hass.states.async_set(CALL, "off")
+    signal = {"name": "In a call", "when": {"entity": CALL, "state": "on"}, "lights": {IRIS: PURPLE}}
+    await setup(hass, lights=[IRIS], looks={"Morning": {"scene": "scene.office_warm"}, "Evening": DARK},
+                signals=[signal])
+    await hass.services.async_call(DOMAIN, "switch_on", {"entity_id": STATUS}, blocking=True)
+    await hass.async_block_till_done()
+    hass.states.async_set(IRIS, "on", {"brightness": 102, "color_mode": "hs", "rgb_color": [255, 128, 0],
+                                       "supported_features": LightEntityFeature.TRANSITION})
+    hass.states.async_set(CALL, "on")
+    await hass.async_block_till_done()
+    assert lights.of("turn_on")[-1]["rgb_color"] == [102, 0, 255]
+    hass.states.async_set(IRIS, "on", {"brightness": 255, "color_mode": "hs", "rgb_color": [102, 0, 255],
+                                       "supported_features": LightEntityFeature.TRANSITION})
+    hass.states.async_set(CALL, "off")
+    await hass.async_block_till_done()
+    back = lights.of("turn_on")[-1]
+    assert back["entity_id"] == IRIS and back["rgb_color"] == [255, 128, 0]
+    assert back["brightness_pct"] == pytest.approx(40, abs=0.1)
 
 
 LAMP = "light.office_lamp"
